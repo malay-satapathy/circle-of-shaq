@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useGame } from '../context/GameContext';
 import { AVATARS, getDeckById } from '../data/decks';
+import { getCardBackgroundStyle } from '../utils/cardArt';
 
 type SuspectTag = 'UNKNOWN' | 'SHAQ' | 'PAKKA';
 
@@ -249,40 +250,44 @@ export const GamePlayView: React.FC = () => {
             </button>
           ) : (
             <div
-              className={`p-6 rounded-2xl border-2 space-y-3 ${
+              style={
                 currentPnpRole?.isSpy
-                  ? 'bg-gradient-to-br from-rose-950/90 to-red-900/60 border-rose-500'
-                  : 'bg-gradient-to-br from-emerald-950/90 to-teal-900/50 border-emerald-500'
-              }`}
+                  ? getCardBackgroundStyle('Police Station', '🕵️‍♂️')
+                  : getCardBackgroundStyle(
+                      currentPnpRole?.location || deck.cards[0].name,
+                      currentPnpRole?.locationEmoji || '📍'
+                    )
+              }
+              className="p-6 rounded-2xl border-2 border-white/25 space-y-3 shadow-2xl overflow-hidden"
             >
               {currentPnpRole?.isSpy ? (
                 <>
-                  <div className="text-4xl">🕵️‍♂️</div>
-                  <div className="text-xs font-mono uppercase tracking-widest text-rose-300">
+                  <div className="text-4xl drop-shadow-md">🕵️‍♂️</div>
+                  <div className="text-xs font-mono uppercase tracking-widest text-rose-300 drop-shadow">
                     IT'S DHOKHA TIME!
                   </div>
-                  <div className="text-2xl font-black text-white">
+                  <div className="text-2xl font-black text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
                     YOU ARE THE {deck.spyTitle.toUpperCase()}!
                   </div>
-                  <p className="text-xs text-rose-200 leading-relaxed">
+                  <p className="text-xs text-rose-100 leading-relaxed drop-shadow">
                     Blend in and figure out the secret {deck.cardNoun.toLowerCase()}.
                   </p>
                   {currentPnpRole.fellowSpies.length > 0 && (
-                    <div className="p-2 rounded-xl bg-black/40 text-xs text-amber-300 font-semibold">
+                    <div className="p-2 rounded-xl bg-black/70 text-xs text-amber-300 font-semibold border border-white/15">
                       Co-Spy: {currentPnpRole.fellowSpies.map((s) => s.name).join(', ')}
                     </div>
                   )}
                 </>
               ) : (
                 <>
-                  <div className="text-4xl">{currentPnpRole?.locationEmoji || '📍'}</div>
-                  <div className="text-xs font-mono uppercase tracking-widest text-emerald-300">
+                  <div className="text-4xl drop-shadow-md">{currentPnpRole?.locationEmoji || '📍'}</div>
+                  <div className="text-xs font-mono uppercase tracking-widest text-emerald-300 drop-shadow">
                     Secret {deck.cardNoun}
                   </div>
-                  <div className="text-2xl font-black text-white">
+                  <div className="text-2xl font-black text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.95)]">
                     {currentPnpRole?.location}
                   </div>
-                  <div className="inline-block px-3 py-1 rounded-full bg-black/40 text-amber-300 text-xs font-bold">
+                  <div className="inline-block px-3 py-1 rounded-full bg-black/75 border border-white/15 text-amber-300 text-xs font-bold shadow">
                     Role: {currentPnpRole?.role}
                   </div>
                 </>
@@ -432,29 +437,34 @@ export const GamePlayView: React.FC = () => {
                 <div className="text-xs text-slate-400">Tap here to view your role</div>
               </div>
             ) : (
-              /* Neutral dark container for both Spy and Innocent so no screen glow gives away the Spy */
+              /* Visual Scenic Identity Card with overlaid text (Spyfall-style background photo + dark vignette) */
               <div
                 onClick={() => setIsCardHidden(true)}
-                className="cursor-pointer p-4 rounded-2xl bg-gradient-to-br from-[#16192b] to-[#0c0e18] border border-white/15 hover:border-white/30 flex items-center justify-between gap-4 transition-all"
+                style={
+                  myRole.isSpy
+                    ? getCardBackgroundStyle('Police Station', '🕵️‍♂️')
+                    : getCardBackgroundStyle(myRole.location || '', myRole.locationEmoji || '📍')
+                }
+                className="cursor-pointer relative overflow-hidden p-5 rounded-2xl border border-white/20 hover:border-amber-400/60 flex items-end justify-between gap-4 min-h-[124px] shadow-xl transition-all"
               >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="w-14 h-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-3xl shrink-0">
+                <div className="relative z-10 flex items-center gap-3.5 min-w-0 w-full">
+                  <div className="w-14 h-14 rounded-2xl bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-3xl shrink-0 shadow-lg">
                     {myRole.isSpy ? '🕵️‍♂️' : myRole.locationEmoji || '📍'}
                   </div>
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                  <div className="min-w-0 flex-1 drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-amber-300 font-bold">
                       {myRole.isSpy ? 'Undercover Impostor' : `Secret ${deck.cardNoun}`}
                     </div>
                     <div className="text-xl sm:text-2xl font-black text-white truncate">
                       {myRole.isSpy ? `YOU ARE THE ${deck.spyTitle.toUpperCase()}` : myRole.location}
                     </div>
-                    <div className="text-xs text-slate-300 font-medium mt-0.5">
+                    <div className="inline-block mt-1 px-2.5 py-0.5 rounded-lg bg-black/65 backdrop-blur-sm border border-white/15 text-xs text-amber-200 font-bold">
                       {myRole.isSpy
-                        ? `Figure out the ${deck.cardNoun.toLowerCase()} without getting caught!`
+                        ? `Blend in & deduce the ${deck.cardNoun.toLowerCase()}!`
                         : `Your Role: ${myRole.role}`}
                     </div>
                     {myRole.isSpy && myRole.fellowSpies.length > 0 && (
-                      <div className="text-xs text-amber-300 font-mono mt-0.5">
+                      <div className="text-xs text-rose-300 font-mono font-bold mt-1">
                         Co-Spy: {myRole.fellowSpies.map((s) => s.name).join(', ')}
                       </div>
                     )}
@@ -546,7 +556,7 @@ export const GamePlayView: React.FC = () => {
           </button>
         </div>
 
-        {/* BOTTOM SECTION: Clean Players Grid + Locations Grid */}
+        {/* BOTTOM SECTION: Clean Players Grid + Visual Locations Matrix */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5">
           {/* PLAYERS LIST: Tap to mark SHAQ (Suspect) or PAKKA (Safe) (5 cols) */}
           <div
@@ -563,7 +573,7 @@ export const GamePlayView: React.FC = () => {
               </p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 gap-2 max-h-[420px] overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 gap-2 max-h-[480px] overflow-y-auto pr-1">
               {activePlayers.map((p) => {
                 const av = AVATARS[p.avatarId % AVATARS.length];
                 const tag = suspectTags[p.id] || 'UNKNOWN';
@@ -634,7 +644,7 @@ export const GamePlayView: React.FC = () => {
             </div>
           </div>
 
-          {/* POSSIBLE LOCATIONS CHECKLIST (7 cols) */}
+          {/* POSSIBLE LOCATIONS VISUAL PHOTO CARDS GRID (7 cols — Spyfall-style Image Cards with Text Overlay!) */}
           <div
             className={`${
               mobileTab === 'SUSPECTS' ? 'hidden md:block' : 'block'
@@ -646,7 +656,7 @@ export const GamePlayView: React.FC = () => {
                   Possible {deck.cardNoun}s ({chosenCards.length})
                 </h2>
                 <p className="text-xs text-slate-400">
-                  Tap any {deck.cardNoun.toLowerCase()} to cross it out as you narrow down clues.
+                  Tap any {deck.cardNoun.toLowerCase()} card to cross it out as you narrow down clues.
                 </p>
               </div>
               {Object.values(crossedLocations).some(Boolean) && (
@@ -654,12 +664,12 @@ export const GamePlayView: React.FC = () => {
                   onClick={() => setCrossedLocations({})}
                   className="text-xs text-rose-400 hover:text-rose-300 font-semibold"
                 >
-                  Reset
+                  Reset Crossed
                 </button>
               )}
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
               {chosenCards.map((card) => {
                 const isCrossed = Boolean(crossedLocations[card.name]);
                 const isMyLocation =
@@ -672,16 +682,49 @@ export const GamePlayView: React.FC = () => {
                     key={card.name}
                     type="button"
                     onClick={() => toggleLocationCard(card.name)}
-                    className={`p-2.5 rounded-2xl border text-left transition-all flex items-center gap-2 ${
+                    style={getCardBackgroundStyle(card.name, card.emoji)}
+                    className={`group relative h-24 sm:h-28 rounded-2xl border overflow-hidden text-left p-2.5 flex flex-col justify-between transition-all shadow-md ${
                       isCrossed
-                        ? 'bg-black/40 border-white/5 opacity-35 line-through text-slate-500'
+                        ? 'border-white/5 opacity-30 grayscale scale-[0.98]'
                         : isMyLocation
-                        ? 'bg-emerald-950/40 border-emerald-500/60 text-white'
-                        : 'bg-white/[0.03] border-white/10 hover:border-amber-400/50 text-white'
+                        ? 'border-emerald-400 ring-2 ring-emerald-400/50 shadow-emerald-500/20'
+                        : 'border-white/15 hover:border-amber-400/70 hover:scale-[1.02]'
                     }`}
                   >
-                    <span className="text-xl shrink-0">{card.emoji}</span>
-                    <span className="font-bold text-xs sm:text-sm truncate">{card.name}</span>
+                    {/* Top Row: Category Badge & Emoji Pill */}
+                    <div className="relative z-10 flex items-center justify-between w-full">
+                      <span className="px-2 py-0.5 rounded-md bg-black/65 backdrop-blur-sm text-[9px] font-mono uppercase tracking-wider text-slate-200 border border-white/10">
+                        {card.category}
+                      </span>
+                      <span className="w-7 h-7 rounded-lg bg-black/65 backdrop-blur-sm flex items-center justify-center text-sm border border-white/10 shadow">
+                        {card.emoji}
+                      </span>
+                    </div>
+
+                    {/* Bottom Row: Bold Overlaid Location Name */}
+                    <div className="relative z-10 w-full">
+                      {isMyLocation && (
+                        <span className="inline-block mb-0.5 px-1.5 py-0.2 rounded bg-emerald-500 text-black font-mono font-black text-[9px] uppercase">
+                          ★ Here Now
+                        </span>
+                      )}
+                      <div
+                        className={`font-black text-xs sm:text-sm leading-tight text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)] line-clamp-2 ${
+                          isCrossed ? 'line-through text-slate-400' : ''
+                        }`}
+                      >
+                        {card.name}
+                      </div>
+                    </div>
+
+                    {/* Crossed-Out Diagonal Overlay */}
+                    {isCrossed && (
+                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-20">
+                        <span className="px-2 py-0.5 rounded bg-rose-600/90 text-white font-mono font-bold text-[10px] uppercase tracking-wider">
+                          ✕ Ruled Out
+                        </span>
+                      </div>
+                    )}
                   </button>
                 );
               })}
@@ -826,11 +869,11 @@ export const GamePlayView: React.FC = () => {
       )}
 
       {/* =====================================================================
-          MODAL 2: SPY LOCATION GUESS PHASE
+          MODAL 2: SPY LOCATION GUESS PHASE (Visual Photo Cards!)
          ===================================================================== */}
       {(status === 'SPY_GUESS' || pnpMidRoundSpyModal) && (
         <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
-          <div className="max-w-2xl w-full p-6 sm:p-8 rounded-3xl bg-[#121422] border-2 border-rose-500 shadow-2xl space-y-5 my-8">
+          <div className="max-w-3xl w-full p-6 sm:p-8 rounded-3xl bg-[#121422] border-2 border-rose-500 shadow-2xl space-y-5 my-8">
             <div className="flex items-center justify-between border-b border-white/10 pb-4">
               <div>
                 <div className="text-xs font-mono uppercase tracking-widest text-rose-400">
@@ -850,9 +893,9 @@ export const GamePlayView: React.FC = () => {
             {myRole?.isSpy || mode === 'PASS_AND_PLAY' ? (
               <>
                 <p className="text-xs sm:text-sm text-amber-200">
-                  Tap the secret <strong>{deck.cardNoun}</strong> below to win the round:
+                  Tap the secret <strong>{deck.cardNoun}</strong> card below to steal the win:
                 </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5 max-h-[400px] overflow-y-auto pr-1">
                   {chosenCards.map((c) => (
                     <button
                       key={c.name}
@@ -861,10 +904,13 @@ export const GamePlayView: React.FC = () => {
                         const spyPlayer = players.find((p) => getPassAndPlayRole(p.id)?.isSpy);
                         submitSpyGuess(c.name, spyPlayer?.id || myPlayerId || undefined);
                       }}
-                      className="p-3 rounded-2xl bg-white/5 hover:bg-amber-500/25 border border-white/15 hover:border-amber-400 text-left flex items-center gap-2.5 transition-all"
+                      style={getCardBackgroundStyle(c.name, c.emoji)}
+                      className="relative h-24 rounded-2xl border border-white/20 hover:border-amber-400 hover:scale-[1.02] p-2.5 text-left flex flex-col justify-between transition-all overflow-hidden shadow-md"
                     >
-                      <span className="text-2xl">{c.emoji}</span>
-                      <span className="font-bold text-xs sm:text-sm text-white truncate">
+                      <span className="w-7 h-7 rounded-lg bg-black/65 backdrop-blur-sm flex items-center justify-center text-sm self-end border border-white/10">
+                        {c.emoji}
+                      </span>
+                      <span className="font-black text-xs sm:text-sm text-white leading-tight drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)] line-clamp-2">
                         {c.name}
                       </span>
                     </button>
@@ -883,7 +929,7 @@ export const GamePlayView: React.FC = () => {
               <div className="py-12 text-center space-y-3">
                 <div className="text-5xl animate-bounce">🕵️‍♂️</div>
                 <div className="text-lg font-bold text-white">
-                  {spyGuessingPlayerName} is guessing the secret {deck.cardNoun.toLowerCase()}...
+                  {spyGuessingPlayerName} is picking from the {deck.cardNoun.toLowerCase()} cards...
                 </div>
               </div>
             )}
@@ -915,10 +961,18 @@ export const GamePlayView: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-3">
-                <span className="text-4xl">{lastRoundSummary.secretLocationEmoji}</span>
-                <div>
-                  <div className="text-[11px] font-mono uppercase text-emerald-300">
+              <div
+                style={getCardBackgroundStyle(
+                  lastRoundSummary.secretLocation,
+                  lastRoundSummary.secretLocationEmoji
+                )}
+                className="p-4 rounded-2xl border border-emerald-400/50 flex items-center gap-3 min-h-[88px] shadow-lg"
+              >
+                <span className="w-12 h-12 rounded-xl bg-black/65 backdrop-blur-sm flex items-center justify-center text-3xl border border-white/15 shrink-0">
+                  {lastRoundSummary.secretLocationEmoji}
+                </span>
+                <div className="drop-shadow-[0_2px_4px_rgba(0,0,0,0.95)]">
+                  <div className="text-[11px] font-mono uppercase text-emerald-300 font-bold">
                     Secret {deck.cardNoun}
                   </div>
                   <div className="text-lg font-black text-white">
@@ -927,10 +981,12 @@ export const GamePlayView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-3">
-                <span className="text-4xl">🕵️‍♂️</span>
+              <div className="p-4 rounded-2xl bg-rose-500/15 border border-rose-500/40 flex items-center gap-3 min-h-[88px]">
+                <span className="w-12 h-12 rounded-xl bg-black/50 flex items-center justify-center text-3xl border border-white/10 shrink-0">
+                  🕵️‍♂️
+                </span>
                 <div>
-                  <div className="text-[11px] font-mono uppercase text-rose-300">
+                  <div className="text-[11px] font-mono uppercase text-rose-300 font-bold">
                     The {deck.spyTitle}
                   </div>
                   <div className="text-lg font-black text-white">

@@ -21,6 +21,7 @@ import {
 import { useGame } from '../context/GameContext';
 import { AVATARS, DECKS, getDeckById } from '../data/decks';
 import { VotingMode } from '../engine/gameEngine';
+import { getCardBackgroundStyle } from '../utils/cardArt';
 
 export const LobbyView: React.FC = () => {
   const {
@@ -330,24 +331,26 @@ export const LobbyView: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {DECKS.map((deck) => {
                 const selected = deck.id === settings.deckId;
+                const heroCard = deck.cards[0];
                 return (
                   <button
                     key={deck.id}
                     type="button"
                     disabled={!isHost}
                     onClick={() => updateSettings({ deckId: deck.id })}
-                    className={`p-4 rounded-2xl border text-left transition-all flex items-start gap-3 ${
+                    style={getCardBackgroundStyle(heroCard.name, deck.badgeEmoji)}
+                    className={`relative overflow-hidden p-4 rounded-2xl border text-left transition-all flex items-start gap-3 min-h-[104px] ${
                       selected
-                        ? 'bg-gradient-to-br from-rose-500/20 via-amber-500/10 to-transparent border-rose-500 shadow-lg'
-                        : 'bg-white/[0.02] border-white/10 hover:border-white/25 opacity-80 hover:opacity-100'
+                        ? 'border-rose-400 ring-2 ring-rose-500/60 shadow-xl scale-[1.01]'
+                        : 'border-white/15 hover:border-white/35 opacity-85 hover:opacity-100'
                     } ${!isHost ? 'cursor-default' : 'cursor-pointer'}`}
                   >
-                    <span className="text-3xl shrink-0">{deck.badgeEmoji}</span>
+                    <span className="text-3xl shrink-0 drop-shadow-md">{deck.badgeEmoji}</span>
                     <div className="min-w-0">
-                      <div className="font-bold text-sm sm:text-base text-white flex items-center gap-2">
+                      <div className="font-black text-sm sm:text-base text-white flex items-center gap-2 drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]">
                         <span>{deck.name}</span>
                       </div>
-                      <p className="text-xs text-slate-400 mt-0.5 line-clamp-2">
+                      <p className="text-xs text-slate-200 mt-0.5 line-clamp-2 drop-shadow-[0_1px_4px_rgba(0,0,0,0.95)]">
                         {deck.description}
                       </p>
                     </div>
