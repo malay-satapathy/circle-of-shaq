@@ -374,21 +374,19 @@ export function initiateVotingPhase(
 
   const now = Date.now();
   let callerName = 'Timer Expired';
-  if (reason === 'PLAYER_CALLED' && callerId) {
-    const caller = room.players.find((p) => p.id === callerId);
-    if (!caller) return { ok: false, error: 'Caller not found.' };
-    if (caller.hasUsedAccusation && !caller.isHost) {
-      return { ok: false, error: 'You already called a mid-round accusation this round!' };
+  if (reason === 'PLAYER_CALLED') {
+    const caller = callerId ? room.players.find((p) => p.id === callerId) : null;
+    callerName = caller ? caller.name : 'Circle Agent';
+    if (caller) {
+      caller.hasUsedAccusation = true;
     }
-    caller.hasUsedAccusation = true;
-    callerName = caller.name;
   } else if (reason === 'HOST_ENDED_ROUND') {
     callerName = 'Host';
   }
 
   // Pause main round timer in case voting is cancelled or resumed
   if (room.roundEndsAt) {
-    room.pausedRemainingMs = Math.max(0, room.roundEndsAt - now);
+    room.pausedRemainingMs = Math.max(5000, room.roundEndsAt - now);
   }
   room.status = 'VOTING';
   room.votingCallerId = callerId;
@@ -409,6 +407,23 @@ export function initiateVotingPhase(
     type: 'accuse',
   });
 
+  return { ok: true };
+}
+
+export function cancelVotingPhase(room: InternalRoom): { ok: boolean } {
+  if (room.status !== 'VOTING') return { ok: false };
+  const now = Date.now();
+  const remaining = room.pausedRemainingMs || 120000;
+  room.status = 'PLAYING';
+  room.roundEndsAt = now + remaining;
+  room.pausedRemainingMs = null;
+  room.votingCallerId = null;
+  room.votingCallerName = null;
+  room.votingEndsAt = null;
+  room.votes = {};
+  room.players.forEach((p) => {
+    p.hasVoted = false;
+  });
   return { ok: true };
 }
 

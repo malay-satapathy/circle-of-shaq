@@ -5,56 +5,54 @@ import QRCode from 'qrcode';
  * Genuine ISO/IEC 18004 Scannable QR Code Component
  * Works with any iOS / Android native camera app!
  */
-export const RoomQrBadge: React.FC<{ value: string; code: string; size?: number }> = ({
-  value,
-  code,
-  size = 160,
-}) => {
-  const [svgDataUrl, setSvgDataUrl] = useState<string>('');
+export const RoomQrBadge: React.FC<{ value: string; code: string; size?: number }> = React.memo(
+  ({ value, code, size = 160 }) => {
+    const [svgDataUrl, setSvgDataUrl] = useState<string>('');
 
-  useEffect(() => {
-    let active = true;
-    QRCode.toDataURL(value, {
-      errorCorrectionLevel: 'M',
-      margin: 2,
-      width: size * 2,
-      color: {
-        dark: '#07080d',
-        light: '#ffffff',
-      },
-    })
-      .then((url) => {
-        if (active) setSvgDataUrl(url);
+    useEffect(() => {
+      let active = true;
+      QRCode.toDataURL(value, {
+        errorCorrectionLevel: 'M',
+        margin: 2,
+        width: size * 2,
+        color: {
+          dark: '#07080d',
+          light: '#ffffff',
+        },
       })
-      .catch((err) => {
-        console.error('QR generation failed:', err);
-      });
-    return () => {
-      active = false;
-    };
-  }, [value, size]);
+        .then((url) => {
+          if (active) setSvgDataUrl(url);
+        })
+        .catch((err) => {
+          console.error('QR generation failed:', err);
+        });
+      return () => {
+        active = false;
+      };
+    }, [value, size]);
 
-  if (!svgDataUrl) {
+    if (!svgDataUrl) {
+      return (
+        <div
+          style={{ width: size, height: size }}
+          className="rounded-xl bg-white flex items-center justify-center text-xs font-mono text-slate-600"
+        >
+          {code}
+        </div>
+      );
+    }
+
     return (
-      <div
-        style={{ width: size, height: size }}
-        className="rounded-xl bg-white flex items-center justify-center text-xs font-mono text-slate-600"
-      >
-        {code}
-      </div>
+      <img
+        src={svgDataUrl}
+        alt={`Scan QR to join Room ${code}`}
+        width={size}
+        height={size}
+        className="rounded-xl bg-white block select-none"
+      />
     );
   }
-
-  return (
-    <img
-      src={svgDataUrl}
-      alt={`Scan QR to join Room ${code}`}
-      width={size}
-      height={size}
-      className="rounded-xl bg-white block select-none"
-    />
-  );
-};
+);
 
 /**
  * Native HTML5 Canvas Confetti Burst for the Winners Podium!

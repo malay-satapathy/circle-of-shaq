@@ -10,6 +10,7 @@ import {
   startNewRoundInRoom,
   passQuestionMic,
   initiateVotingPhase,
+  cancelVotingPhase,
   castPlayerVote,
   finalizeVotingOutcome,
   triggerMidRoundSpyReveal,
@@ -20,21 +21,19 @@ import {
 } from '../engine/gameEngine';
 import { getDeckById } from '../data/decks';
 
-const STORAGE_KEY_SESSION = 'circle_of_shaq_session_v3';
-const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room_v3';
-const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry_v3';
+const STORAGE_KEY_SESSION = 'circle_of_shaq_session_v4';
+const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room_v4';
+const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry_v4';
 
-// Unique PeerJS ID namespace
-const PEER_ROOM_PREFIX = 'circle-of-shaq-v3-room-';
+const PEER_ROOM_PREFIX = 'circle-of-shaq-v4-room-';
 
-// Multi-Broker Cloud WSS Pub/Sub Mesh (Port 443/8884/8084 — bypasses all NATs, firewalls & 5G CGNAT, supports 24+ players & retained state!)
+// Redundant Dual-Broker Cloud WSS Pub/Sub Mesh (Port 443/8884/8084 — bypasses all NATs/5G firewalls, supports 24+ players & retained state)
 const CLOUD_WSS_BROKERS = [
   'wss://broker.emqx.io:8084/mqtt',
   'wss://broker.hivemq.com:8884/mqtt',
-  'wss://test.mosquitto.org:8081',
 ];
 
-const MQTT_TOPIC_PREFIX = 'circle-of-shaq/v3/room';
+const MQTT_TOPIC_PREFIX = 'circle-of-shaq/v4/room';
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -80,6 +79,7 @@ interface GameContextValue {
   startRound: () => void;
   passMic: (fromPlayerId: string, toTargetId: string) => void;
   callVote: (callerId?: string) => void;
+  cancelVote: () => void;
   castVote: (voterId: string, targetId: string) => void;
   forceEndVoting: () => void;
   blowCoverAsSpy: (spyPlayerId?: string) => void;
@@ -121,6 +121,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const mqttClientsRef = useRef<MqttClient[]>([]);
   const processedActionIdsRef = useRef<Set<string>>(new Set());
   const latestStateSeqRef = useRef<number>(0);
+  const lastRoomHashRef = useRef<string>('');
+  const lastRoleHashRef = useRef<string>('');
   const knownPresenceMapRef = useRef<Map<string, PresencePayload>>(new Map());
   const kickedPlayerIdsRef = useRef<Set<string>>(new Set());
 
@@ -132,14 +134,32 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const clearError = useCallback(() => setErrorBanner(null), []);
 
   /**
+   * Anti-Flicker State Setter: Only triggers a React state update when the room state payload has genuinely changed!
+   */
+  const updateRoomStateIfChanged = useCallback((nextState: PublicRoomState) => {
+    const hash = JSON.stringify(nextState);
+    if (hash === lastRoomHashRef.current) return;
+    lastRoomHashRef.current = hash;
+    setRoomState(nextState);
+  }, []);
+
+  const updateMyRoleIfChanged = useCallback((nextRole: PrivateRolePayload | null) => {
+    const hash = JSON.stringify(nextRole);
+    if (hash === lastRoleHashRef.current) return;
+    lastRoleHashRef.current = hash;
+    setMyRole(nextRole);
+  }, []);
+
+  /**
    * Merges any newly discovered presence payloads into a PublicRoomState for optimistic Guest rendering
-   * (so if 20 players join while the Host's phone screen is briefly locked, every Guest still sees all 20 players immediately!)
    */
   const mergePresenceIntoPublicState = useCallback((baseState: PublicRoomState): PublicRoomState => {
     const mergedPlayers = [...baseState.players];
+    let added = false;
     knownPresenceMapRef.current.forEach((pres) => {
       if (kickedPlayerIdsRef.current.has(pres.playerId)) return;
       if (!mergedPlayers.some((p) => p.id === pres.playerId)) {
+        added = true;
         const isMidGame = baseState.status !== 'LOBBY' && baseState.status !== 'PODIUM';
         mergedPlayers.push({
           id: pres.playerId,
@@ -155,6 +175,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
       }
     });
+    if (!added) return baseState;
     return {
       ...baseState,
       players: mergedPlayers,
@@ -181,26 +202,20 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   /**
-   * Broadcasts updated state from the Host to:
-   * 1. Host's own React state + sessionStorage
-   * 2. Multi-Broker Cloud WSS MQTT Mesh with `retain: true` (works across 24+ mobile & laptop devices on any 5G/Wi-Fi network!)
-   *    - Public state -> `circle-of-shaq/v3/room/{roomId}/state` (retained)
-   *    - Each player's private role -> `circle-of-shaq/v3/room/{roomId}/role/{playerId}` (retained, zero-leak!)
-   * 3. WebRTC PeerJS connections
-   * 4. Same-browser BroadcastChannel
+   * Broadcasts updated state from the Host to all connected devices
    */
   const syncHostStateToAll = useCallback(() => {
     const room = hostRoomRef.current;
     if (!room) return;
 
-    const seq = Date.now();
+    const seq = latestStateSeqRef.current + 1;
     latestStateSeqRef.current = seq;
 
     const pubState = toPublicRoomState(room);
-    setRoomState(pubState);
+    updateRoomStateIfChanged(pubState);
 
     if (myPlayerIdRef.current) {
-      setMyRole(toPrivateRolePayload(room, myPlayerIdRef.current));
+      updateMyRoleIfChanged(toPrivateRolePayload(room, myPlayerIdRef.current));
     }
 
     const rolesByPlayer: Record<string, PrivateRolePayload | null> = {};
@@ -215,14 +230,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         JSON.stringify({
           roomState: pubState,
           rolesByPlayer,
-          updatedAt: seq,
+          updatedAt: Date.now(),
         })
       );
     } catch {
       // ignore storage quota errors
     }
 
-    // 1. Publish to Cloud WSS MQTT Mesh with `retain: true` so 24+ devices & late joiners get state immediately!
+    // 1. Publish to Cloud WSS MQTT Mesh with `retain: true`
     const stateTopic = `${MQTT_TOPIC_PREFIX}/${room.roomId}/state`;
     publishToCloudMesh(
       stateTopic,
@@ -236,7 +251,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       true
     );
 
-    // Publish each player's private role to their dedicated topic (Zero-Leak: public state never contains Spy or Location!)
+    // Publish each player's private role to their dedicated topic (Zero-Leak!)
     room.players.forEach((p) => {
       const roleTopic = `${MQTT_TOPIC_PREFIX}/${room.roomId}/role/${p.id}`;
       publishToCloudMesh(
@@ -277,7 +292,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         rolesByPlayer,
       });
     }
-  }, [publishToCloudMesh]);
+  }, [publishToCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]);
 
   /**
    * Authoritative Host Action Processor
@@ -303,7 +318,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const { playerId, secretToken, playerName, avatarId } = action;
           if (!playerId) return;
 
-          // If this player was previously kicked by Host, only re-admit if they explicitly send a fresh JOIN_REQUEST action
           if (action.isExplicitJoin) {
             kickedPlayerIdsRef.current.delete(playerId);
           } else if (kickedPlayerIdsRef.current.has(playerId)) {
@@ -318,11 +332,25 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             (p) => p.id === playerId || (secretToken && p.secretToken === secretToken)
           );
           if (existing) {
-            existing.isConnected = true;
-            if (playerName) existing.name = playerName.trim().slice(0, 24);
-            if (typeof avatarId === 'number') existing.avatarId = avatarId;
+            let changed = false;
+            if (!existing.isConnected) {
+              existing.isConnected = true;
+              changed = true;
+            }
+            const cleanName = playerName ? playerName.trim().slice(0, 24) : existing.name;
+            if (cleanName && existing.name !== cleanName) {
+              existing.name = cleanName;
+              changed = true;
+            }
+            if (typeof avatarId === 'number' && existing.avatarId !== avatarId) {
+              existing.avatarId = avatarId;
+              changed = true;
+            }
             if (incomingConn) {
               guestConnsRef.current.set(existing.id, incomingConn);
+            }
+            if (changed) {
+              syncHostStateToAll();
             }
           } else {
             if (room.players.length >= 24) {
@@ -360,13 +388,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 type: 'info',
               });
             }
+            syncHostStateToAll();
           }
-          syncHostStateToAll();
           break;
         }
 
         case 'UPDATE_AVATAR': {
-          if (actor && typeof action.avatarId === 'number') {
+          if (actor && typeof action.avatarId === 'number' && actor.avatarId !== action.avatarId) {
             actor.avatarId = action.avatarId;
             syncHostStateToAll();
           }
@@ -399,7 +427,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           kickedPlayerIdsRef.current.add(action.targetPlayerId);
           knownPresenceMapRef.current.delete(action.targetPlayerId);
           room.players = room.players.filter((p) => p.id !== action.targetPlayerId);
-          // Clear retained presence on Cloud Mesh
           publishToCloudMesh(
             `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${action.targetPlayerId}`,
             '',
@@ -445,6 +472,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } else {
             syncHostStateToAll();
           }
+          break;
+        }
+
+        case 'CANCEL_VOTE': {
+          cancelVotingPhase(room);
+          syncHostStateToAll();
           break;
         }
 
@@ -538,7 +571,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [syncHostStateToAll]);
 
   /**
-   * Re-sync immediately when a mobile user unlocks their phone or switches back from WhatsApp/Camera
+   * Re-sync when mobile user unlocks phone or switches back from WhatsApp/Camera
    */
   useEffect(() => {
     const handleVisibilityOrFocus = () => {
@@ -556,9 +589,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [syncHostStateToAll]);
 
-  /**
-   * Tears down existing Cloud WSS MQTT connections cleanly
-   */
   const cleanupCloudMesh = useCallback(() => {
     mqttClientsRef.current.forEach((client) => {
       try {
@@ -572,8 +602,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /**
    * Connects to the Multi-Broker Cloud WSS Mesh for a given Room Code.
-   * - Works across 24+ simultaneous mobile & laptop players on any Wi-Fi or 5G network.
-   * - Uses MQTT Retained Messages so room state and player presence survive mobile screen-lock!
    */
   const setupCloudMesh = useCallback(
     (
@@ -599,7 +627,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           try {
             const client = mqtt.connect(brokerUrl, {
               keepalive: 30,
-              reconnectPeriod: 2000,
+              reconnectPeriod: 3000,
               connectTimeout: 6000,
               clean: true,
             });
@@ -608,10 +636,9 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             client.on('connect', () => {
               if (isHostMode) {
                 client.subscribe([presenceWildcard, actionsTopic], { qos: 1 }, () => {
-                  // Re-publish current retained state to this broker as soon as connected
                   syncHostStateToAll();
                 });
-                setConnectionStatus('CONNECTED');
+                setConnectionStatus((prev) => (prev === 'CONNECTED' ? prev : 'CONNECTED'));
                 if (!resolvedConnect) {
                   resolvedConnect = true;
                   resolve(true);
@@ -644,10 +671,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const pres = data as PresencePayload;
                 if (!pres.playerId) return;
 
+                const prevPres = knownPresenceMapRef.current.get(pres.playerId);
                 knownPresenceMapRef.current.set(pres.playerId, pres);
 
                 if (isHostMode && hostRoomRef.current) {
-                  // Host automatically registers any player present on the Cloud Mesh!
                   const alreadyInRoom = hostRoomRef.current.players.some(
                     (p) => p.id === pres.playerId
                   );
@@ -662,13 +689,16 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                       },
                       pres.playerId
                     );
-                  } else if (alreadyInRoom) {
-                    // Ensure newly connected guest gets latest state
-                    syncHostStateToAll();
                   }
-                } else if (!isHostMode) {
-                  // Optimistically merge into Guest's view so all 20+ players see each other immediately
-                  setRoomState((prev) => (prev ? mergePresenceIntoPublicState(prev) : prev));
+                } else if (!isHostMode && !prevPres) {
+                  setRoomState((prev) => {
+                    if (!prev) return prev;
+                    const merged = mergePresenceIntoPublicState(prev);
+                    const hash = JSON.stringify(merged);
+                    if (hash === lastRoomHashRef.current) return prev;
+                    lastRoomHashRef.current = hash;
+                    return merged;
+                  });
                 }
                 return;
               }
@@ -678,14 +708,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 if (Array.isArray(data.kickedIds)) {
                   data.kickedIds.forEach((id: string) => kickedPlayerIdsRef.current.add(id));
                 }
-                if (data.seq && data.seq < latestStateSeqRef.current) {
-                  return;
-                }
-                if (data.seq) latestStateSeqRef.current = data.seq;
 
                 const merged = mergePresenceIntoPublicState(data.roomState);
-                setRoomState(merged);
-                setConnectionStatus('CONNECTED');
+                updateRoomStateIfChanged(merged);
+                setConnectionStatus((prev) => (prev === 'CONNECTED' ? prev : 'CONNECTED'));
                 if (onGuestReceivedState) {
                   onGuestReceivedState(true);
                 }
@@ -699,7 +725,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 topic === myRoleTopic &&
                 data.type === 'CLOUD_ROLE_SYNC'
               ) {
-                setMyRole(data.privateRole || null);
+                updateMyRoleIfChanged(data.privateRole || null);
                 return;
               }
 
@@ -710,7 +736,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             });
 
             client.on('error', () => {
-              // Other brokers in the mesh remain active
+              // Other broker in mesh stays active
             });
           } catch {
             // ignore broker init error
@@ -727,7 +753,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }, 4000);
       });
     },
-    [cleanupCloudMesh, mergePresenceIntoPublicState, processHostAction, syncHostStateToAll]
+    [cleanupCloudMesh, mergePresenceIntoPublicState, processHostAction, syncHostStateToAll, updateMyRoleIfChanged, updateRoomStateIfChanged]
   );
 
   /**
@@ -747,15 +773,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (isHostMode && data.type === 'BC_CLIENT_ACTION') {
           processHostAction(data.action, data.senderId);
         } else if (!isHostMode && data.type === 'BC_STATE_SYNC') {
-          setRoomState(mergePresenceIntoPublicState(data.roomState));
+          updateRoomStateIfChanged(mergePresenceIntoPublicState(data.roomState));
           if (myPlayerIdRef.current && data.rolesByPlayer) {
-            setMyRole(data.rolesByPlayer[myPlayerIdRef.current] || null);
+            updateMyRoleIfChanged(data.rolesByPlayer[myPlayerIdRef.current] || null);
           }
-          setConnectionStatus('CONNECTED');
+          setConnectionStatus((prev) => (prev === 'CONNECTED' ? prev : 'CONNECTED'));
         }
       };
     },
-    [mergePresenceIntoPublicState, processHostAction]
+    [mergePresenceIntoPublicState, processHostAction, updateMyRoleIfChanged, updateRoomStateIfChanged]
   );
 
   /**
@@ -777,7 +803,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           peerRef.current = peer;
 
           peer.on('open', () => {
-            setConnectionStatus('CONNECTED');
+            setConnectionStatus((prev) => (prev === 'CONNECTED' ? prev : 'CONNECTED'));
             if (!resolved) {
               resolved = true;
               resolve(true);
@@ -858,8 +884,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (rawHostRoom) {
           const restoredRoom: InternalRoom = JSON.parse(rawHostRoom);
           hostRoomRef.current = restoredRoom;
-          setRoomState(toPublicRoomState(restoredRoom));
-          setMyRole(toPrivateRolePayload(restoredRoom, saved.playerId));
+          updateRoomStateIfChanged(toPublicRoomState(restoredRoom));
+          updateMyRoleIfChanged(toPrivateRolePayload(restoredRoom, saved.playerId));
           setConnectionStatus('CONNECTED');
           setupBroadcastChannel(restoredRoom.roomId, true);
           if (restoredRoom.mode !== 'PASS_AND_PLAY') {
@@ -895,6 +921,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       knownPresenceMapRef.current.clear();
       kickedPlayerIdsRef.current.clear();
       processedActionIdsRef.current.clear();
+      lastRoomHashRef.current = '';
+      lastRoleHashRef.current = '';
 
       const newRoom = createInitialRoom(roomId, hostName, avatarId, mode, hostId, secretToken);
       hostRoomRef.current = newRoom;
@@ -914,12 +942,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       syncHostStateToAll();
 
       if (mode !== 'PASS_AND_PLAY') {
-        // Start Cloud WSS Mesh (Primary 24-player transport) + WebRTC PeerNode in parallel
         await Promise.race([
           setupCloudMesh(roomId, true),
           startHostPeerNode(roomId),
         ]);
-        // Publish retained state immediately once connected
         syncHostStateToAll();
         setConnectionStatus('CONNECTED');
       } else {
@@ -944,6 +970,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       knownPresenceMapRef.current.clear();
       kickedPlayerIdsRef.current.clear();
       latestStateSeqRef.current = 0;
+      lastRoomHashRef.current = '';
+      lastRoleHashRef.current = '';
 
       let playerId = myPlayerIdRef.current;
       let secretToken = secretTokenRef.current;
@@ -1012,6 +1040,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // 2. Connect via Multi-Broker Cloud WSS Mesh + WebRTC simultaneously!
       return new Promise<boolean>((resolve) => {
         let settled = false;
+        let announcedJoinOnCloud = false;
 
         const finish = (ok: boolean, errMsg?: string) => {
           if (settled) return;
@@ -1021,6 +1050,25 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setConnectionStatus('ERROR');
           }
           resolve(ok);
+        };
+
+        const announceJoinOnce = () => {
+          if (announcedJoinOnCloud) return;
+          announcedJoinOnCloud = true;
+          publishToCloudMesh(
+            `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
+            presencePayload,
+            true
+          );
+          publishToCloudMesh(
+            `${MQTT_TOPIC_PREFIX}/${roomId}/actions`,
+            {
+              type: 'CLOUD_CLIENT_ACTION',
+              senderId: playerId,
+              action: joinAction,
+            },
+            false
+          );
         };
 
         // Listen for BroadcastChannel response if on same device
@@ -1037,41 +1085,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Start Cloud WSS Mesh (Primary cross-device transport for 24+ mobile & laptop players)
         setupCloudMesh(roomId, false, (ok, errMsg) => {
           if (ok) {
-            // Publish retained presence + explicit join action across all cloud brokers
-            publishToCloudMesh(
-              `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
-              presencePayload,
-              true
-            );
-            publishToCloudMesh(
-              `${MQTT_TOPIC_PREFIX}/${roomId}/actions`,
-              {
-                type: 'CLOUD_CLIENT_ACTION',
-                senderId: playerId,
-                action: joinAction,
-              },
-              false
-            );
+            announceJoinOnce();
             finish(true);
           } else if (errMsg) {
             finish(false, errMsg);
           }
         }).then(() => {
-          // Even before receiving state, publish our presence & join request so an active Host responds immediately
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
-            presencePayload,
-            true
-          );
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${roomId}/actions`,
-            {
-              type: 'CLOUD_CLIENT_ACTION',
-              senderId: playerId,
-              action: joinAction,
-            },
-            false
-          );
+          announceJoinOnce();
         });
 
         // Also open WebRTC Peer connection in parallel as secondary fast-path
@@ -1108,25 +1128,24 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 return;
               }
               if (data.type === 'STATE_SYNC' && data.roomState) {
-                setRoomState(mergePresenceIntoPublicState(data.roomState));
-                setMyRole(data.privateRole || null);
-                setConnectionStatus('CONNECTED');
+                updateRoomStateIfChanged(mergePresenceIntoPublicState(data.roomState));
+                updateMyRoleIfChanged(data.privateRole || null);
+                setConnectionStatus((prev) => (prev === 'CONNECTED' ? prev : 'CONNECTED'));
                 finish(true);
               }
             });
           });
 
           guestPeer.on('error', () => {
-            // Do NOT fail early on PeerJS error because Cloud WSS Mesh handles NAT/5G/mobile sleep!
+            // Cloud WSS Mesh handles NAT/5G/mobile sleep
           });
         } catch {
-          // Ignore WebRTC init error; Cloud WSS Mesh is primary
+          // Ignore WebRTC init error
         }
 
         // 12-second timeout across all transports
         setTimeout(() => {
           if (!settled) {
-            // Clear our speculative retained presence if room didn't exist
             publishToCloudMesh(
               `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
               '',
@@ -1140,7 +1159,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }, 12000);
       });
     },
-    [mergePresenceIntoPublicState, publishToCloudMesh, setupBroadcastChannel, setupCloudMesh]
+    [mergePresenceIntoPublicState, publishToCloudMesh, setupBroadcastChannel, setupCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]
   );
 
   const dispatchAction = useCallback(
@@ -1200,7 +1219,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const activeRoomId = roomState?.roomId || activeRoomIdRef.current;
     const myId = myPlayerIdRef.current;
 
-    // Clear retained presence if Guest leaves
     if (activeRoomId && myId && !hostRoomRef.current) {
       publishToCloudMesh(
         `${MQTT_TOPIC_PREFIX}/${activeRoomId}/presence/${myId}`,
@@ -1215,6 +1233,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     activeRoomIdRef.current = null;
     knownPresenceMapRef.current.clear();
     kickedPlayerIdsRef.current.clear();
+    lastRoomHashRef.current = '';
+    lastRoleHashRef.current = '';
 
     cleanupCloudMesh();
 
@@ -1298,14 +1318,27 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         startRound: () => dispatchAction({ type: 'START_ROUND' }),
         passMic: (fromPlayerId, toTargetId) =>
           dispatchAction({ type: 'PASS_MIC', fromPlayerId, toTargetId }),
-        callVote: (callerId) => dispatchAction({ type: 'CALL_VOTE', callerId }),
+        callVote: (callerId) =>
+          dispatchAction({
+            type: 'CALL_VOTE',
+            callerId: callerId || myPlayerIdRef.current || undefined,
+            reason: 'PLAYER_CALLED',
+          }),
+        cancelVote: () => dispatchAction({ type: 'CANCEL_VOTE' }),
         castVote: (voterId, targetId) =>
           dispatchAction({ type: 'CAST_VOTE', voterId, targetId }),
         forceEndVoting: () => dispatchAction({ type: 'FORCE_END_VOTING' }),
         blowCoverAsSpy: (spyPlayerId) =>
-          dispatchAction({ type: 'BLOW_COVER', spyPlayerId }),
+          dispatchAction({
+            type: 'BLOW_COVER',
+            spyPlayerId: spyPlayerId || myPlayerIdRef.current || undefined,
+          }),
         submitSpyGuess: (guessedLocation, spyPlayerId) =>
-          dispatchAction({ type: 'SUBMIT_SPY_GUESS', guessedLocation, spyPlayerId }),
+          dispatchAction({
+            type: 'SUBMIT_SPY_GUESS',
+            guessedLocation,
+            spyPlayerId: spyPlayerId || myPlayerIdRef.current || undefined,
+          }),
         manualHostOutcome: (outcome) =>
           dispatchAction({ type: 'MANUAL_HOST_OUTCOME', outcome }),
         showWinnersPodium: () => dispatchAction({ type: 'SHOW_PODIUM' }),
