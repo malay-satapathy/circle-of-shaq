@@ -21,20 +21,25 @@ import {
   toPrivateRolePayload,
 } from '../engine/gameEngine';
 import { getDeckById } from '../data/decks';
+import {
+  deriveBlindTopicHash,
+  encryptPayload,
+  decryptPayload,
+} from '../utils/crypto';
 
-const STORAGE_KEY_SESSION = 'circle_of_shaq_session_v4';
-const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room_v4';
-const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry_v4';
+const STORAGE_KEY_SESSION = 'circle_of_shaq_session';
+const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room';
+const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry';
 
-const PEER_ROOM_PREFIX = 'circle-of-shaq-v4-room-';
+const PEER_ROOM_PREFIX = 'circle-of-shaq-room-';
 
-// Redundant Dual-Broker Cloud WSS Pub/Sub Mesh (Port 443/8884/8084 — bypasses all NATs/5G firewalls, supports 24+ players & retained state)
+// Redundant Dual-Broker Cloud WSS Pub/Sub Mesh (Port 443/8884/8084 — works across Wi-Fi & 5G/LTE mobile networks, supports 24+ players & retained state)
 const CLOUD_WSS_BROKERS = [
   'wss://broker.emqx.io:8084/mqtt',
   'wss://broker.hivemq.com:8884/mqtt',
 ];
 
-const MQTT_TOPIC_PREFIX = 'circle-of-shaq/v4/room';
+const MQTT_TOPIC_NAMESPACE = 'circle-of-shaq/mesh';
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -118,6 +123,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const myPlayerIdRef = useRef<string | null>(null);
   const secretTokenRef = useRef<string>('');
   const activeRoomIdRef = useRef<string | null>(null);
+  const activeBlindHashRef = useRef<string | null>(null);
 
   // Cloud WSS MQTT Mesh + WebRTC (PeerJS) + BroadcastChannel refs
   const mqttClientsRef = useRef<MqttClient[]>([]);
@@ -156,13 +162,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Merges active presence payloads and filters out any departed/kicked players for instant Guest UI updates
    */
   const mergePresenceIntoPublicState = useCallback((baseState: PublicRoomState): PublicRoomState => {
-    // 1. Filter out anyone who has explicitly departed or been kicked
     const filteredPlayers = baseState.players.filter(
       (p) => !departedOrKickedIdsRef.current.has(p.id)
     );
     let changed = filteredPlayers.length !== baseState.players.length;
 
-    // 2. Add any newly discovered active presence payloads
     knownPresenceMapRef.current.forEach((pres) => {
       if (departedOrKickedIdsRef.current.has(pres.playerId) || pres.status === 'LEFT') return;
       if (!filteredPlayers.some((p) => p.id === pres.playerId)) {
@@ -191,26 +195,37 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   /**
-   * Publishes a payload across all connected Cloud WSS MQTT brokers
+   * Publishes a raw string payload across all connected Cloud WSS MQTT brokers
    */
-  const publishToCloudMesh = useCallback(
-    (topic: string, data: any, retain = false) => {
-      const payloadStr = typeof data === 'string' ? data : JSON.stringify(data);
-      mqttClientsRef.current.forEach((client) => {
-        if (client && client.connected) {
-          try {
-            client.publish(topic, payloadStr, { qos: 1, retain });
-          } catch {
-            // ignore individual broker error
-          }
+  const publishRawToCloudMesh = useCallback((topic: string, payloadStr: string, retain = false) => {
+    mqttClientsRef.current.forEach((client) => {
+      if (client && client.connected) {
+        try {
+          client.publish(topic, payloadStr, { qos: 1, retain });
+        } catch {
+          // ignore individual broker error
         }
-      });
+      }
+    });
+  }, []);
+
+  /**
+   * Encrypts a payload with AES-256-GCM and publishes it to the blinded topic on the Cloud WSS Mesh
+   */
+  const publishEncryptedToCloudMesh = useCallback(
+    async (topic: string, data: unknown, encryptionKey: string, retain = false) => {
+      try {
+        const encryptedEnvelope = await encryptPayload(data, encryptionKey);
+        publishRawToCloudMesh(topic, encryptedEnvelope, retain);
+      } catch {
+        // ignore encryption error
+      }
     },
-    []
+    [publishRawToCloudMesh]
   );
 
   /**
-   * Broadcasts updated state from the Host to all connected devices
+   * Broadcasts updated state from the Host to all connected devices using AES-256-GCM E2EE
    */
   const syncHostStateToAll = useCallback(() => {
     const room = hostRoomRef.current;
@@ -245,33 +260,41 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // ignore storage quota errors
     }
 
-    // 1. Publish to Cloud WSS MQTT Mesh with `retain: true`
-    const stateTopic = `${MQTT_TOPIC_PREFIX}/${room.roomId}/state`;
-    publishToCloudMesh(
-      stateTopic,
-      {
-        type: 'CLOUD_STATE_SYNC',
-        seq,
-        roomId: room.roomId,
-        roomState: pubState,
-        departedIds: Array.from(departedOrKickedIdsRef.current),
-      },
-      true
-    );
+    // 1. Encrypt and publish to Blinded Cloud WSS Mesh topics with `retain: true`
+    deriveBlindTopicHash(room.roomId).then((blindHash) => {
+      activeBlindHashRef.current = blindHash;
+      const stateTopic = `${MQTT_TOPIC_NAMESPACE}/${blindHash}/state`;
 
-    // Publish each player's private role to their dedicated topic (Zero-Leak!)
-    room.players.forEach((p) => {
-      const roleTopic = `${MQTT_TOPIC_PREFIX}/${room.roomId}/role/${p.id}`;
-      publishToCloudMesh(
-        roleTopic,
+      publishEncryptedToCloudMesh(
+        stateTopic,
         {
-          type: 'CLOUD_ROLE_SYNC',
+          type: 'CLOUD_STATE_SYNC',
           seq,
-          playerId: p.id,
-          privateRole: rolesByPlayer[p.id] || null,
+          roomId: room.roomId,
+          roomState: pubState,
+          departedIds: Array.from(departedOrKickedIdsRef.current),
         },
+        room.roomId,
         true
       );
+
+      // Zero-Trust Private Role Encryption:
+      // Each player's private role is encrypted with `${room.roomId}:${p.secretToken}` so NOT EVEN other players in the same room can decrypt someone else's role card!
+      room.players.forEach((p) => {
+        const roleTopic = `${MQTT_TOPIC_NAMESPACE}/${blindHash}/role/${p.id}`;
+        const playerPrivateKey = `${room.roomId}:${p.secretToken}`;
+        publishEncryptedToCloudMesh(
+          roleTopic,
+          {
+            type: 'CLOUD_ROLE_SYNC',
+            seq,
+            playerId: p.id,
+            privateRole: rolesByPlayer[p.id] || null,
+          },
+          playerPrivateKey,
+          true
+        );
+      });
     });
 
     // 2. Send over WebRTC PeerJS connections
@@ -300,10 +323,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         rolesByPlayer,
       });
     }
-  }, [publishToCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]);
+  }, [publishEncryptedToCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]);
 
   /**
-   * Authoritative Host Action Processor
+   * Authoritative Host Action Processor with Strict `secretToken` Verification
    */
   const processHostAction = useCallback(
     (action: any, senderPlayerId?: string, incomingConn?: DataConnection) => {
@@ -320,6 +343,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const actorId = senderPlayerId || action.playerId || myPlayerIdRef.current;
       const actor = room.players.find((p) => p.id === actorId);
+
+      // Verify secretToken for existing non-host players to prevent player-impersonation inside a room
+      if (
+        actor &&
+        actor.id !== myPlayerIdRef.current &&
+        action.type !== 'JOIN_REQUEST' &&
+        action.secretToken &&
+        actor.secretToken &&
+        action.secretToken !== actor.secretToken
+      ) {
+        return;
+      }
 
       switch (action.type) {
         case 'JOIN_REQUEST': {
@@ -343,6 +378,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             let changed = false;
             if (!existing.isConnected) {
               existing.isConnected = true;
+              changed = true;
+            }
+            if (secretToken && existing.secretToken !== secretToken) {
+              existing.secretToken = secretToken;
               changed = true;
             }
             const cleanName = playerName ? playerName.trim().slice(0, 24) : existing.name;
@@ -398,11 +437,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!targetId) return;
           departedOrKickedIdsRef.current.add(targetId);
           knownPresenceMapRef.current.delete(targetId);
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${targetId}`,
-            '',
-            true
-          );
+          if (activeBlindHashRef.current) {
+            publishRawToCloudMesh(
+              `${MQTT_TOPIC_NAMESPACE}/${activeBlindHashRef.current}/presence/${targetId}`,
+              '',
+              true
+            );
+          }
           const conn = guestConnsRef.current.get(targetId);
           if (conn) {
             conn.close();
@@ -420,11 +461,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const targetId = action.targetPlayerId;
           departedOrKickedIdsRef.current.add(targetId);
           knownPresenceMapRef.current.delete(targetId);
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${targetId}`,
-            '',
-            true
-          );
+          if (activeBlindHashRef.current) {
+            publishRawToCloudMesh(
+              `${MQTT_TOPIC_NAMESPACE}/${activeBlindHashRef.current}/presence/${targetId}`,
+              '',
+              true
+            );
+          }
           const targetConn = guestConnsRef.current.get(targetId);
           if (targetConn) {
             targetConn.close();
@@ -568,7 +611,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
     },
-    [publishToCloudMesh, syncHostStateToAll]
+    [publishRawToCloudMesh, syncHostStateToAll]
   );
 
   // Authoritative Timer Loop on Host
@@ -624,12 +667,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   /**
-   * Connects to the Multi-Broker Cloud WSS Mesh for a given Room Code.
-   * Configures MQTT Last Will & Testament (`will`) so if a player's tab is closed or crashes,
-   * the broker automatically clears their presence and notifies the Circle to remove them!
+   * Connects to the Multi-Broker Cloud WSS Mesh using SHA-256 Blind Topic Routing & AES-256-GCM E2EE.
    */
   const setupCloudMesh = useCallback(
-    (
+    async (
       roomId: string,
       isHostMode: boolean,
       onGuestReceivedState?: (ok: boolean, errorMsg?: string) => void
@@ -637,15 +678,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       cleanupCloudMesh();
       activeRoomIdRef.current = roomId;
 
+      const blindHash = await deriveBlindTopicHash(roomId);
+      activeBlindHashRef.current = blindHash;
+
       return new Promise((resolve) => {
         let resolvedConnect = false;
         const clients: MqttClient[] = [];
 
-        const stateTopic = `${MQTT_TOPIC_PREFIX}/${roomId}/state`;
-        const presenceWildcard = `${MQTT_TOPIC_PREFIX}/${roomId}/presence/+`;
-        const actionsTopic = `${MQTT_TOPIC_PREFIX}/${roomId}/actions`;
+        const stateTopic = `${MQTT_TOPIC_NAMESPACE}/${blindHash}/state`;
+        const presenceWildcard = `${MQTT_TOPIC_NAMESPACE}/${blindHash}/presence/+`;
+        const actionsTopic = `${MQTT_TOPIC_NAMESPACE}/${blindHash}/actions`;
         const myId = myPlayerIdRef.current;
-        const myRoleTopic = myId ? `${MQTT_TOPIC_PREFIX}/${roomId}/role/${myId}` : null;
+        const myRoleTopic = myId ? `${MQTT_TOPIC_NAMESPACE}/${blindHash}/role/${myId}` : null;
 
         CLOUD_WSS_BROKERS.forEach((brokerUrl) => {
           try {
@@ -657,7 +701,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
               will:
                 !isHostMode && myId
                   ? {
-                      topic: `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${myId}`,
+                      topic: `${MQTT_TOPIC_NAMESPACE}/${blindHash}/presence/${myId}`,
                       payload: '',
                       qos: 1,
                       retain: true,
@@ -687,7 +731,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
             });
 
-            client.on('message', (topic, payloadBuf) => {
+            client.on('message', async (topic, payloadBuf) => {
               const rawStr = payloadBuf.toString();
 
               // 1. Handle Player Presence & Automatic Departure (`.../presence/{playerId}`)
@@ -718,12 +762,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   return;
                 }
 
-                let pres: PresencePayload;
-                try {
-                  pres = JSON.parse(rawStr);
-                } catch {
-                  return;
-                }
+                // Decrypt AES-256-GCM Presence Payload using `roomId`
+                const pres = await decryptPayload<PresencePayload>(rawStr, roomId);
                 if (!pres || !pres.playerId) return;
 
                 if (pres.status === 'LEFT') {
@@ -770,15 +810,22 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
 
               if (!rawStr) return;
-              let data: any;
-              try {
-                data = JSON.parse(rawStr);
-              } catch {
+
+              // 2. Handle Encrypted Retained Private Role (`.../role/{myPlayerId}`) on Guest devices
+              // Decrypted using `${roomId}:${secretToken}` so ONLY this specific player can decrypt their role!
+              if (!isHostMode && myRoleTopic && topic === myRoleTopic) {
+                const myPrivateKey = `${roomId}:${secretTokenRef.current}`;
+                const roleData = await decryptPayload(rawStr, myPrivateKey);
+                if (roleData && roleData.type === 'CLOUD_ROLE_SYNC') {
+                  updateMyRoleIfChanged(roleData.privateRole || null);
+                }
                 return;
               }
+
+              // 3. Decrypt Room-Level Payloads (`.../state` or `.../actions`) using `roomId`
+              const data = await decryptPayload(rawStr, roomId);
               if (!data || typeof data !== 'object') return;
 
-              // 2. Handle Retained Room State (`.../state`) on Guest devices
               if (!isHostMode && topic === stateTopic && data.type === 'CLOUD_STATE_SYNC' && data.roomState) {
                 if (Array.isArray(data.departedIds)) {
                   data.departedIds.forEach((id: string) => {
@@ -796,18 +843,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 return;
               }
 
-              // 3. Handle Retained Private Role (`.../role/{myPlayerId}`) on Guest devices
-              if (
-                !isHostMode &&
-                myRoleTopic &&
-                topic === myRoleTopic &&
-                data.type === 'CLOUD_ROLE_SYNC'
-              ) {
-                updateMyRoleIfChanged(data.privateRole || null);
-                return;
-              }
-
-              // 4. Handle Client Actions (`.../actions`) on Host device
+              // 4. Handle Encrypted Client Actions (`.../actions`) on Host device
               if (isHostMode && topic === actionsTopic && data.type === 'CLOUD_CLIENT_ACTION' && data.action) {
                 processHostAction(data.action, data.senderId);
               }
@@ -863,10 +899,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   /**
-   * Secondary Transport: PeerJS WebRTC
+   * Secondary Transport: PeerJS WebRTC (Uses SHA-256 Blinded Peer ID so Room Code is never exposed on PeerJS broker)
    */
   const startHostPeerNode = useCallback(
-    (roomId: string): Promise<boolean> => {
+    async (roomId: string): Promise<boolean> => {
+      const blindHash = await deriveBlindTopicHash(roomId);
       return new Promise((resolve) => {
         if (peerRef.current) {
           peerRef.current.destroy();
@@ -875,7 +912,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         let resolved = false;
         try {
-          const peer = new Peer(`${PEER_ROOM_PREFIX}${roomId}`, {
+          const peer = new Peer(`${PEER_ROOM_PREFIX}${blindHash.slice(0, 16)}`, {
             config: { iceServers: ICE_SERVERS },
           });
           peerRef.current = peer;
@@ -1087,6 +1124,9 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
       sessionStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(sessionObj));
 
+      const blindHash = await deriveBlindTopicHash(roomId);
+      activeBlindHashRef.current = blindHash;
+
       const joinAction = {
         actionId: generateId('act'),
         type: 'JOIN_REQUEST',
@@ -1116,7 +1156,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         action: joinAction,
       });
 
-      // 2. Connect via Multi-Broker Cloud WSS Mesh + WebRTC simultaneously!
+      // 2. Connect via Encrypted Multi-Broker Cloud WSS Mesh + WebRTC simultaneously!
       return new Promise<boolean>((resolve) => {
         let settled = false;
         let announcedJoinOnCloud = false;
@@ -1134,18 +1174,20 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const announceJoinOnce = () => {
           if (announcedJoinOnCloud) return;
           announcedJoinOnCloud = true;
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
+          publishEncryptedToCloudMesh(
+            `${MQTT_TOPIC_NAMESPACE}/${blindHash}/presence/${playerId}`,
             presencePayload,
+            roomId,
             true
           );
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${roomId}/actions`,
+          publishEncryptedToCloudMesh(
+            `${MQTT_TOPIC_NAMESPACE}/${blindHash}/actions`,
             {
               type: 'CLOUD_CLIENT_ACTION',
               senderId: playerId,
               action: joinAction,
             },
+            roomId,
             false
           );
         };
@@ -1161,7 +1203,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         }
 
-        // Start Cloud WSS Mesh (Primary cross-device transport for 24+ mobile & laptop players)
+        // Start Cloud WSS Mesh (Primary cross-network transport for Wi-Fi + 5G/LTE Mobile)
         setupCloudMesh(roomId, false, (ok, errMsg) => {
           if (ok) {
             announceJoinOnce();
@@ -1186,7 +1228,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
           guestPeer.on('open', () => {
             if (settled) return;
-            const conn = guestPeer.connect(`${PEER_ROOM_PREFIX}${roomId}`, {
+            const conn = guestPeer.connect(`${PEER_ROOM_PREFIX}${blindHash.slice(0, 16)}`, {
               reliable: true,
               serialization: 'json',
             });
@@ -1225,8 +1267,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // 12-second timeout across all transports
         setTimeout(() => {
           if (!settled) {
-            publishToCloudMesh(
-              `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${playerId}`,
+            publishRawToCloudMesh(
+              `${MQTT_TOPIC_NAMESPACE}/${blindHash}/presence/${playerId}`,
               '',
               true
             );
@@ -1238,7 +1280,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }, 12000);
       });
     },
-    [mergePresenceIntoPublicState, publishToCloudMesh, setupBroadcastChannel, setupCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]
+    [mergePresenceIntoPublicState, publishEncryptedToCloudMesh, publishRawToCloudMesh, setupBroadcastChannel, setupCloudMesh, updateMyRoleIfChanged, updateRoomStateIfChanged]
   );
 
   const dispatchAction = useCallback(
@@ -1246,6 +1288,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const action = {
         ...rawAction,
         actionId: rawAction.actionId || generateId('act'),
+        secretToken: secretTokenRef.current,
       };
 
       if (hostRoomRef.current) {
@@ -1255,17 +1298,20 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const activeRoomId = roomState?.roomId || activeRoomIdRef.current;
 
-      // 1. Send over Cloud WSS Mesh (Primary transport)
+      // 1. Encrypt and send over Cloud WSS Mesh (Primary transport)
       if (activeRoomId) {
-        publishToCloudMesh(
-          `${MQTT_TOPIC_PREFIX}/${activeRoomId}/actions`,
-          {
-            type: 'CLOUD_CLIENT_ACTION',
-            senderId: myPlayerIdRef.current,
-            action,
-          },
-          false
-        );
+        deriveBlindTopicHash(activeRoomId).then((blindHash) => {
+          publishEncryptedToCloudMesh(
+            `${MQTT_TOPIC_NAMESPACE}/${blindHash}/actions`,
+            {
+              type: 'CLOUD_CLIENT_ACTION',
+              senderId: myPlayerIdRef.current,
+              action,
+            },
+            activeRoomId,
+            false
+          );
+        });
       }
 
       // 2. Send over WebRTC if open
@@ -1291,11 +1337,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
       }
     },
-    [processHostAction, publishToCloudMesh, roomState?.roomId]
+    [processHostAction, publishEncryptedToCloudMesh, roomState?.roomId]
   );
 
   const leaveRoom = useCallback(() => {
     const activeRoomId = roomState?.roomId || activeRoomIdRef.current;
+    const blindHash = activeBlindHashRef.current;
     const myId = myPlayerIdRef.current;
 
     if (activeRoomId && myId && !hostRoomRef.current) {
@@ -1303,25 +1350,29 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         actionId: generateId('act'),
         type: 'PLAYER_LEFT',
         playerId: myId,
+        secretToken: secretTokenRef.current,
       };
 
-      // 1. Clear retained presence on Cloud WSS Mesh (triggers immediate removal on all peers + Host!)
-      publishToCloudMesh(
-        `${MQTT_TOPIC_PREFIX}/${activeRoomId}/presence/${myId}`,
-        '',
-        true
-      );
+      if (blindHash) {
+        // 1. Clear retained presence on Cloud WSS Mesh
+        publishRawToCloudMesh(
+          `${MQTT_TOPIC_NAMESPACE}/${blindHash}/presence/${myId}`,
+          '',
+          true
+        );
 
-      // 2. Broadcast explicit PLAYER_LEFT action across Cloud Mesh, WebRTC, and BroadcastChannel
-      publishToCloudMesh(
-        `${MQTT_TOPIC_PREFIX}/${activeRoomId}/actions`,
-        {
-          type: 'CLOUD_CLIENT_ACTION',
-          senderId: myId,
-          action: leaveAction,
-        },
-        false
-      );
+        // 2. Broadcast encrypted PLAYER_LEFT action across Cloud Mesh
+        publishEncryptedToCloudMesh(
+          `${MQTT_TOPIC_NAMESPACE}/${blindHash}/actions`,
+          {
+            type: 'CLOUD_CLIENT_ACTION',
+            senderId: myId,
+            action: leaveAction,
+          },
+          activeRoomId,
+          false
+        );
+      }
 
       if (hostConnRef.current && hostConnRef.current.open) {
         try {
@@ -1349,15 +1400,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     sessionStorage.removeItem(STORAGE_KEY_HOST_ROOM);
     hostRoomRef.current = null;
     activeRoomIdRef.current = null;
+    activeBlindHashRef.current = null;
     knownPresenceMapRef.current.clear();
     departedOrKickedIdsRef.current.clear();
     lastRoomHashRef.current = '';
     lastRoleHashRef.current = '';
 
-    // Allow 120ms for the departure packets to flush over the WebSockets before closing the socket handles
     setTimeout(() => {
       cleanupCloudMesh();
-    }, 120);
+    }, 150);
 
     if (hostConnRef.current) {
       hostConnRef.current.close();
@@ -1377,7 +1428,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setMyRole(null);
     setMyPlayerId(null);
     setConnectionStatus('IDLE');
-  }, [cleanupCloudMesh, publishToCloudMesh, roomState?.roomId]);
+  }, [cleanupCloudMesh, publishEncryptedToCloudMesh, publishRawToCloudMesh, roomState?.roomId]);
 
   const addPassAndPlayPlayer = useCallback(
     (name: string, avatarId: number) => {

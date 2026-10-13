@@ -1,11 +1,20 @@
 import mqtt from 'mqtt';
+import crypto from 'node:crypto';
 
 const BROKER = 'wss://broker.emqx.io:8084/mqtt';
 const ROOM_ID = 'TS' + Math.floor(10 + Math.random() * 89);
-const PREFIX = `circle-of-shaq/v3/room/${ROOM_ID}`;
+const APP_CRYPTO_DOMAIN = 'circle-of-shaq-enterprise-e2ee-domain';
+
+const blindHash = crypto
+  .createHash('sha256')
+  .update(`${APP_CRYPTO_DOMAIN}:topic:${ROOM_ID}`)
+  .digest('hex')
+  .slice(0, 32);
+
+const PREFIX = `circle-of-shaq/mesh/${blindHash}`;
 const TOTAL_GUESTS = 21; // 1 Host + 21 Guests = 22 Players!
 
-console.log(`🚀 Starting 22-Device Cloud WSS Mesh Simulation for Room "${ROOM_ID}"...`);
+console.log(`🚀 Starting 22-Device Encrypted Cloud Mesh Simulation for Room "${ROOM_ID}" (Blind Topic: ${blindHash.slice(0, 12)}...)...`);
 
 const hostPlayers = [
   { id: 'host-1', name: 'Host_Mobile', avatarId: 0, isHost: true },
@@ -23,7 +32,7 @@ function publishHostState() {
       status: 'LOBBY',
       players: hostPlayers,
     },
-    kickedIds: [],
+    departedIds: [],
   });
 
   if (hostClient.connected) {
