@@ -1,81 +1,58 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
 
 /**
- * Lightweight deterministic QR-style Room Invite Matrix SVG
- * Renders a crisp, scannable-looking visual badge + room code with zero external dependencies.
+ * Genuine ISO/IEC 18004 Scannable QR Code Component
+ * Works with any iOS / Android native camera app!
  */
 export const RoomQrBadge: React.FC<{ value: string; code: string; size?: number }> = ({
   value,
   code,
   size = 160,
 }) => {
-  const grid = useMemo(() => {
-    const dim = 15;
-    const cells: boolean[][] = Array.from({ length: dim }, () => Array(dim).fill(false));
+  const [svgDataUrl, setSvgDataUrl] = useState<string>('');
 
-    // Draw standard QR finder patterns in 3 corners
-    const drawFinder = (r0: number, c0: number) => {
-      for (let r = 0; r < 5; r++) {
-        for (let c = 0; c < 5; c++) {
-          const isBorder = r === 0 || r === 4 || c === 0 || c === 4;
-          const isCenter = r === 2 && c === 2;
-          cells[r0 + r][c0 + c] = isBorder || isCenter;
-        }
-      }
+  useEffect(() => {
+    let active = true;
+    QRCode.toDataURL(value, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: size * 2,
+      color: {
+        dark: '#07080d',
+        light: '#ffffff',
+      },
+    })
+      .then((url) => {
+        if (active) setSvgDataUrl(url);
+      })
+      .catch((err) => {
+        console.error('QR generation failed:', err);
+      });
+    return () => {
+      active = false;
     };
-    drawFinder(0, 0);
-    drawFinder(0, dim - 5);
-    drawFinder(dim - 5, 0);
+  }, [value, size]);
 
-    // Deterministic hash from value + code for interior modules
-    let hash = 2166136261;
-    const str = `${value}:${code}`;
-    for (let i = 0; i < str.length; i++) {
-      hash ^= str.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-
-    for (let r = 0; r < dim; r++) {
-      for (let c = 0; c < dim; c++) {
-        const inTopLeft = r < 6 && c < 6;
-        const inTopRight = r < 6 && c >= dim - 6;
-        const inBottomLeft = r >= dim - 6 && c < 6;
-        if (inTopLeft || inTopRight || inBottomLeft) continue;
-        hash ^= (r * 31 + c * 17) & 0xff;
-        hash = Math.imul(hash, 16777619);
-        cells[r][c] = (Math.abs(hash) % 10) < 5;
-      }
-    }
-    return cells;
-  }, [value, code]);
-
-  const dim = grid.length;
+  if (!svgDataUrl) {
+    return (
+      <div
+        style={{ width: size, height: size }}
+        className="rounded-xl bg-white flex items-center justify-center text-xs font-mono text-slate-600"
+      >
+        {code}
+      </div>
+    );
+  }
 
   return (
-    <svg
+    <img
+      src={svgDataUrl}
+      alt={`Scan QR to join Room ${code}`}
       width={size}
       height={size}
-      viewBox={`0 0 ${dim + 2} ${dim + 2}`}
-      className="rounded-xl bg-white p-1 shadow-inner"
-      aria-label={`Invite Matrix for Room ${code}`}
-    >
-      <rect width={dim + 2} height={dim + 2} fill="#ffffff" rx={1} />
-      {grid.map((row, r) =>
-        row.map((filled, c) =>
-          filled ? (
-            <rect
-              key={`${r}-${c}`}
-              x={c + 1}
-              y={r + 1}
-              width={0.9}
-              height={0.9}
-              rx={0.18}
-              fill="#0f172a"
-            />
-          ) : null
-        )
-      )}
-    </svg>
+      className="rounded-xl bg-white block select-none"
+    />
   );
 };
 

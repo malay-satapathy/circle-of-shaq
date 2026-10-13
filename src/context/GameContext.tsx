@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
+import Peer, { DataConnection } from 'peerjs';
 import {
   InternalRoom,
   PublicRoomState,
@@ -18,9 +19,19 @@ import {
 } from '../engine/gameEngine';
 import { getDeckById } from '../data/decks';
 
-const STORAGE_KEY_SESSION = 'circle_of_shaq_session_v1';
-const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room_v1';
-const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry_v1';
+const STORAGE_KEY_SESSION = 'circle_of_shaq_session_v2';
+const STORAGE_KEY_HOST_ROOM = 'circle_of_shaq_host_room_v2';
+const STORAGE_KEY_ROOMS_REGISTRY = 'circle_of_shaq_rooms_registry_v2';
+
+// Unique PeerJS ID namespace so any phone/laptop on the internet can discover the Host's 4-letter Room Code!
+const PEER_ROOM_PREFIX = 'circle-of-shaq-v2-room-';
+
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
+];
 
 interface StoredSession {
   roomId: string;
@@ -86,12 +97,21 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const hostRoomRef = useRef<InternalRoom | null>(null);
   const myPlayerIdRef = useRef<string | null>(null);
   const secretTokenRef = useRef<string>('');
+
+  // Cross-device WebRTC (PeerJS) + Same-device BroadcastChannel refs
+  const peerRef = useRef<Peer | null>(null);
+  const guestConnsRef = useRef<Map<string, DataConnection>>(new Map()); // playerId -> DataConnection (on Host)
+  const hostConnRef = useRef<DataConnection | null>(null); // DataConnection to Host (on Guest)
   const bcRef = useRef<BroadcastChannel | null>(null);
-  const sseRef = useRef<EventSource | null>(null);
 
   const clearError = useCallback(() => setErrorBanner(null), []);
 
-  // Sync authoritative state from Host to local state, BroadcastChannel, localStorage registry, and optional SSE backend
+  /**
+   * Broadcasts updated state from the Host to:
+   * 1. Host's own React state + sessionStorage
+   * 2. All connected remote phones/laptops over WebRTC DataConnections (Zero-Leak: each player ONLY receives their own privateRole!)
+   * 3. Same-browser tabs over BroadcastChannel
+   */
   const syncHostStateToAll = useCallback(() => {
     const room = hostRoomRef.current;
     if (!room) return;
@@ -104,11 +124,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const rolesByPlayer: Record<string, PrivateRolePayload | null> = {};
-    const rolesByToken: Record<string, PrivateRolePayload | null> = {};
     room.players.forEach((p) => {
-      const rolePayload = toPrivateRolePayload(room, p.id);
-      rolesByPlayer[p.id] = rolePayload;
-      rolesByToken[p.secretToken] = rolePayload;
+      rolesByPlayer[p.id] = toPrivateRolePayload(room, p.id);
     });
 
     try {
@@ -125,7 +142,22 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // ignore storage quota errors
     }
 
-    // 1. BroadcastChannel for instant multi-tab sync
+    // Send over WebRTC PeerJS connections to every remote device in the Circle!
+    guestConnsRef.current.forEach((conn, pid) => {
+      if (conn && conn.open) {
+        try {
+          conn.send({
+            type: 'STATE_SYNC',
+            roomState: pubState,
+            privateRole: rolesByPlayer[pid] || null,
+          });
+        } catch (err) {
+          console.warn('Failed to send to peer', pid, err);
+        }
+      }
+    });
+
+    // Send over BroadcastChannel for same-device multi-tab testing
     if (bcRef.current) {
       bcRef.current.postMessage({
         type: 'BC_STATE_SYNC',
@@ -134,25 +166,15 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         rolesByPlayer,
       });
     }
-
-    // 2. Optional Native Backend SSE Sync (/api/rooms/:roomId/sync) if server is running
-    fetch(`/api/rooms/${room.roomId}/sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        roomState: pubState,
-        rolesByToken,
-        hostToken: secretTokenRef.current,
-      }),
-    }).catch(() => {
-      // Silent fallback when running on static GitHub Pages
-    });
   }, []);
 
+  /**
+   * Authoritative Host Action Processor
+   */
   const processHostAction = useCallback(
-    (action: any, senderPlayerId?: string) => {
+    (action: any, senderPlayerId?: string, incomingConn?: DataConnection) => {
       const room = hostRoomRef.current;
-      if (!room) return;
+      if (!room || !action) return;
 
       const actorId = senderPlayerId || action.playerId || myPlayerIdRef.current;
       const actor = room.players.find((p) => p.id === actorId);
@@ -160,6 +182,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       switch (action.type) {
         case 'JOIN_REQUEST': {
           const { playerId, secretToken, playerName, avatarId } = action;
+          if (incomingConn && playerId) {
+            guestConnsRef.current.set(playerId, incomingConn);
+          }
+
           const existing = room.players.find(
             (p) => p.id === playerId || (secretToken && p.secretToken === secretToken)
           );
@@ -167,8 +193,17 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
             existing.isConnected = true;
             if (playerName) existing.name = playerName.trim().slice(0, 24);
             if (typeof avatarId === 'number') existing.avatarId = avatarId;
+            if (incomingConn) {
+              guestConnsRef.current.set(existing.id, incomingConn);
+            }
           } else {
             if (room.players.length >= 24) {
+              if (incomingConn && incomingConn.open) {
+                incomingConn.send({
+                  type: 'JOIN_REJECTED',
+                  error: 'Circle is full (24 players maximum)!',
+                });
+              }
               return;
             }
             const isMidGame = room.status !== 'LOBBY' && room.status !== 'PODIUM';
@@ -234,6 +269,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!actor?.isHost) return;
           if (action.targetPlayerId === actor.id) return;
           room.players = room.players.filter((p) => p.id !== action.targetPlayerId);
+          const targetConn = guestConnsRef.current.get(action.targetPlayerId);
+          if (targetConn) {
+            targetConn.close();
+            guestConnsRef.current.delete(action.targetPlayerId);
+          }
           syncHostStateToAll();
           break;
         }
@@ -339,7 +379,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [syncHostStateToAll]
   );
 
-  // Authoritative Timer Loop on Host (Fixes Loophole #6)
+  // Authoritative Timer Loop on Host
   useEffect(() => {
     const interval = setInterval(() => {
       const room = hostRoomRef.current;
@@ -361,60 +401,128 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => clearInterval(interval);
   }, [syncHostStateToAll]);
 
-  // Setup BroadcastChannel + SSE Stream
-  const setupChannels = useCallback(
-    (roomId: string, isHostMode: boolean, secretToken: string) => {
-      if (typeof BroadcastChannel !== 'undefined') {
-        if (bcRef.current) bcRef.current.close();
-        const bc = new BroadcastChannel(`cos_channel_${roomId}`);
-        bcRef.current = bc;
+  /**
+   * Setup Same-Browser BroadcastChannel
+   */
+  const setupBroadcastChannel = useCallback(
+    (roomId: string, isHostMode: boolean) => {
+      if (typeof BroadcastChannel === 'undefined') return;
+      if (bcRef.current) bcRef.current.close();
+      const bc = new BroadcastChannel(`cos_channel_${roomId}`);
+      bcRef.current = bc;
 
-        bc.onmessage = (ev) => {
-          const data = ev.data;
-          if (!data || data.roomId !== roomId) return;
+      bc.onmessage = (ev) => {
+        const data = ev.data;
+        if (!data || data.roomId !== roomId) return;
 
-          if (isHostMode && data.type === 'BC_CLIENT_ACTION') {
-            processHostAction(data.action, data.senderId);
-          } else if (!isHostMode && data.type === 'BC_STATE_SYNC') {
-            setRoomState(data.roomState);
-            if (myPlayerIdRef.current && data.rolesByPlayer) {
-              setMyRole(data.rolesByPlayer[myPlayerIdRef.current] || null);
-            }
-            setConnectionStatus('CONNECTED');
+        if (isHostMode && data.type === 'BC_CLIENT_ACTION') {
+          processHostAction(data.action, data.senderId);
+        } else if (!isHostMode && data.type === 'BC_STATE_SYNC') {
+          setRoomState(data.roomState);
+          if (myPlayerIdRef.current && data.rolesByPlayer) {
+            setMyRole(data.rolesByPlayer[myPlayerIdRef.current] || null);
           }
-        };
-      }
-
-      // Also connect to optional Node.js SSE stream if running locally or on cloud host
-      try {
-        if (sseRef.current) sseRef.current.close();
-        const es = new EventSource(`/api/rooms/${roomId}/stream?token=${encodeURIComponent(secretToken)}`);
-        sseRef.current = es;
-        es.onmessage = (ev) => {
-          try {
-            const parsed = JSON.parse(ev.data);
-            if (isHostMode && parsed.clientAction) {
-              processHostAction(parsed.clientAction.action, parsed.clientAction.senderId);
-            } else if (!isHostMode && parsed.roomState) {
-              setRoomState(parsed.roomState);
-              setMyRole(parsed.privateRole || null);
-              setConnectionStatus('CONNECTED');
-            }
-          } catch {
-            // ignore
-          }
-        };
-        es.onerror = () => {
-          es.close();
-        };
-      } catch {
-        // ignore when static
-      }
+          setConnectionStatus('CONNECTED');
+        }
+      };
     },
     [processHostAction]
   );
 
-  // Restore session on page refresh (F5) automatically! (Fixes Loophole #5)
+  /**
+   * Registers the Host's 4-letter Room Code on the global PeerJS WebRTC Signaling Broker
+   * so any phone or laptop on Wi-Fi or 5G can join by typing the 4-letter code or scanning the QR!
+   */
+  const startHostPeerNode = useCallback(
+    (roomId: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        if (peerRef.current) {
+          peerRef.current.destroy();
+          peerRef.current = null;
+        }
+
+        let resolved = false;
+        try {
+          const peer = new Peer(`${PEER_ROOM_PREFIX}${roomId}`, {
+            config: { iceServers: ICE_SERVERS },
+          });
+          peerRef.current = peer;
+
+          peer.on('open', () => {
+            setConnectionStatus('CONNECTED');
+            if (!resolved) {
+              resolved = true;
+              resolve(true);
+            }
+          });
+
+          peer.on('connection', (conn) => {
+            let boundPlayerId: string | null = null;
+
+            conn.on('data', (payload: any) => {
+              if (!payload || typeof payload !== 'object') return;
+              if (payload.type === 'CLIENT_ACTION' && payload.action) {
+                if (payload.action.type === 'JOIN_REQUEST' && payload.action.playerId) {
+                  boundPlayerId = payload.action.playerId;
+                  guestConnsRef.current.set(boundPlayerId!, conn);
+                }
+                processHostAction(
+                  payload.action,
+                  boundPlayerId || payload.senderId,
+                  conn
+                );
+              }
+            });
+
+            conn.on('close', () => {
+              if (boundPlayerId && hostRoomRef.current) {
+                const p = hostRoomRef.current.players.find((pl) => pl.id === boundPlayerId);
+                if (p) {
+                  p.isConnected = false;
+                  syncHostStateToAll();
+                }
+                guestConnsRef.current.delete(boundPlayerId);
+              }
+            });
+          });
+
+          peer.on('disconnected', () => {
+            try {
+              peer.reconnect();
+            } catch {
+              // ignore
+            }
+          });
+
+          peer.on('error', (err: any) => {
+            console.warn('Host PeerJS notice:', err?.type || err);
+            setConnectionStatus('CONNECTED');
+            if (!resolved) {
+              resolved = true;
+              resolve(false);
+            }
+          });
+
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              setConnectionStatus('CONNECTED');
+              resolve(true);
+            }
+          }, 3000);
+        } catch {
+          if (!resolved) {
+            resolved = true;
+            setConnectionStatus('CONNECTED');
+            resolve(false);
+          }
+        }
+      });
+    },
+    [processHostAction, syncHostStateToAll]
+  );
+
+  // Restore session on page refresh (F5) automatically!
   useEffect(() => {
     try {
       const rawSession = sessionStorage.getItem(STORAGE_KEY_SESSION);
@@ -434,7 +542,10 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setRoomState(toPublicRoomState(restoredRoom));
           setMyRole(toPrivateRolePayload(restoredRoom, saved.playerId));
           setConnectionStatus('CONNECTED');
-          setupChannels(restoredRoom.roomId, true, saved.secretToken);
+          setupBroadcastChannel(restoredRoom.roomId, true);
+          if (restoredRoom.mode === 'P2P') {
+            startHostPeerNode(restoredRoom.roomId);
+          }
         }
       } else {
         joinRoom(saved.roomId, saved.playerName, saved.avatarId);
@@ -452,7 +563,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       mode: 'P2P' | 'PASS_AND_PLAY' | 'CLOUD' = 'P2P'
     ): Promise<string> => {
       setErrorBanner(null);
-      setConnectionStatus('CONNECTED');
+      setConnectionStatus('CONNECTING');
 
       const roomId = generateRoomCode();
       const hostId = generateId('host');
@@ -476,11 +587,18 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
       sessionStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(sessionObj));
 
-      setupChannels(roomId, true, secretToken);
+      setupBroadcastChannel(roomId, true);
       syncHostStateToAll();
+
+      if (mode === 'P2P') {
+        await startHostPeerNode(roomId);
+      } else {
+        setConnectionStatus('CONNECTED');
+      }
+
       return roomId;
     },
-    [setupChannels, syncHostStateToAll]
+    [setupBroadcastChannel, startHostPeerNode, syncHostStateToAll]
   );
 
   const joinRoom = useCallback(
@@ -526,8 +644,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
       sessionStorage.setItem(STORAGE_KEY_SESSION, JSON.stringify(sessionObj));
 
-      setupChannels(roomId, false, secretToken);
-
       const joinAction = {
         type: 'JOIN_REQUEST',
         playerId,
@@ -536,7 +652,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         avatarId,
       };
 
-      // 1. Send via BroadcastChannel
+      // 1. Setup BroadcastChannel (instant if joining from another tab on the same device)
+      setupBroadcastChannel(roomId, false);
       bcRef.current?.postMessage({
         type: 'BC_CLIENT_ACTION',
         roomId,
@@ -544,53 +661,108 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         action: joinAction,
       });
 
-      // 2. Also send via API if server is running
-      fetch(`/api/rooms/${roomId}/action`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ senderId: playerId, action: joinAction }),
-      }).catch(() => {});
-
-      // 3. Check localStorage room registry for instant local hydration
-      try {
-        const cachedRaw = localStorage.getItem(`${STORAGE_KEY_ROOMS_REGISTRY}_${roomId}`);
-        if (cachedRaw) {
-          const cached = JSON.parse(cachedRaw);
-          if (cached.roomState) {
-            setRoomState(cached.roomState);
-            setConnectionStatus('CONNECTED');
-            return true;
-          }
-        }
-      } catch {
-        // ignore
-      }
-
+      // 2. Connect across devices via PeerJS WebRTC (works from any phone/laptop on GitHub Pages!)
       return new Promise<boolean>((resolve) => {
         let settled = false;
-        const timeout = setTimeout(() => {
-          if (!settled) {
-            settled = true;
-            setErrorBanner(`Could not find active Circle "${roomId}". Make sure the Host has created it!`);
-            setConnectionStatus('ERROR');
-            resolve(false);
-          }
-        }, 3500);
 
-        const prevHandler = bcRef.current ? bcRef.current.onmessage : null;
+        const finish = (ok: boolean, errMsg?: string) => {
+          if (settled) return;
+          settled = true;
+          if (errMsg) {
+            setErrorBanner(errMsg);
+            setConnectionStatus('ERROR');
+          }
+          resolve(ok);
+        };
+
+        // Listen for BroadcastChannel response if on same device
+        const prevBcHandler = bcRef.current ? bcRef.current.onmessage : null;
         if (bcRef.current) {
           bcRef.current.onmessage = (ev) => {
-            if (prevHandler) prevHandler.call(bcRef.current!, ev);
-            if (ev.data?.type === 'BC_STATE_SYNC' && ev.data?.roomId === roomId && !settled) {
-              settled = true;
-              clearTimeout(timeout);
-              resolve(true);
+            if (prevBcHandler) prevBcHandler.call(bcRef.current!, ev);
+            if (ev.data?.type === 'BC_STATE_SYNC' && ev.data?.roomId === roomId) {
+              finish(true);
             }
           };
         }
+
+        // Open WebRTC Peer connection to `${PEER_ROOM_PREFIX}${roomId}`
+        try {
+          if (peerRef.current) {
+            peerRef.current.destroy();
+            peerRef.current = null;
+          }
+          const guestPeer = new Peer({
+            config: { iceServers: ICE_SERVERS },
+          });
+          peerRef.current = guestPeer;
+
+          guestPeer.on('open', () => {
+            if (settled) return;
+            const conn = guestPeer.connect(`${PEER_ROOM_PREFIX}${roomId}`, {
+              reliable: true,
+              serialization: 'json',
+            });
+            hostConnRef.current = conn;
+
+            conn.on('open', () => {
+              conn.send({
+                type: 'CLIENT_ACTION',
+                senderId: playerId,
+                action: joinAction,
+              });
+            });
+
+            conn.on('data', (data: any) => {
+              if (!data || typeof data !== 'object') return;
+              if (data.type === 'JOIN_REJECTED') {
+                finish(false, data.error || 'Could not join Circle.');
+                return;
+              }
+              if (data.type === 'STATE_SYNC' && data.roomState) {
+                setRoomState(data.roomState);
+                setMyRole(data.privateRole || null);
+                setConnectionStatus('CONNECTED');
+                finish(true);
+              }
+            });
+
+            conn.on('close', () => {
+              setConnectionStatus('RECONNECTING');
+            });
+
+            conn.on('error', () => {
+              finish(
+                false,
+                `Connection to Circle "${roomId}" interrupted. Check that the Host tab is open.`
+              );
+            });
+          });
+
+          guestPeer.on('error', (err: any) => {
+            if (err?.type === 'peer-unavailable') {
+              finish(
+                false,
+                `Could not find active Circle "${roomId}". Make sure the Host has created it and kept their tab open!`
+              );
+            } else {
+              finish(false, `Network error (${err?.type || 'webrtc'}) connecting to Circle "${roomId}".`);
+            }
+          });
+        } catch {
+          finish(false, `Unable to initialize WebRTC connection for Circle "${roomId}".`);
+        }
+
+        // 10-second timeout for mobile cellular handshakes
+        setTimeout(() => {
+          finish(
+            false,
+            `Timed out connecting to Circle "${roomId}". Make sure the Host device has the lobby open!`
+          );
+        }, 10000);
       });
     },
-    [setupChannels]
+    [setupBroadcastChannel]
   );
 
   const dispatchAction = useCallback(
@@ -598,6 +770,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (hostRoomRef.current) {
         processHostAction(action, myPlayerIdRef.current || undefined);
         return;
+      }
+
+      if (hostConnRef.current && hostConnRef.current.open) {
+        hostConnRef.current.send({
+          type: 'CLIENT_ACTION',
+          senderId: myPlayerIdRef.current,
+          action,
+        });
       }
 
       if (bcRef.current && roomState?.roomId) {
@@ -608,14 +788,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           action,
         });
       }
-
-      if (roomState?.roomId) {
-        fetch(`/api/rooms/${roomState.roomId}/action`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ senderId: myPlayerIdRef.current, action }),
-        }).catch(() => {});
-      }
     },
     [processHostAction, roomState?.roomId]
   );
@@ -624,13 +796,19 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     sessionStorage.removeItem(STORAGE_KEY_SESSION);
     sessionStorage.removeItem(STORAGE_KEY_HOST_ROOM);
     hostRoomRef.current = null;
+    if (hostConnRef.current) {
+      hostConnRef.current.close();
+      hostConnRef.current = null;
+    }
+    guestConnsRef.current.forEach((c) => c.close());
+    guestConnsRef.current.clear();
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
     if (bcRef.current) {
       bcRef.current.close();
       bcRef.current = null;
-    }
-    if (sseRef.current) {
-      sseRef.current.close();
-      sseRef.current = null;
     }
     setRoomState(null);
     setMyRole(null);
