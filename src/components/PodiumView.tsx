@@ -18,6 +18,7 @@ export const PodiumView: React.FC = () => {
     roomState,
     isHost,
     startRound,
+    restartNewMatch,
     returnToLobbyKeepScores,
     resetScoresAndReturnToLobby,
     leaveRoom,
@@ -42,7 +43,9 @@ export const PodiumView: React.FC = () => {
             <div>
               <span className="font-black text-base sm:text-lg">CIRCLE OF SHAQ</span>
               <span className="ml-2 text-xs font-mono text-amber-300">
-                Room #{roomState.roomId}
+                {roomState.mode === 'PASS_AND_PLAY'
+                  ? '📱 Pass & Play'
+                  : `Room #${roomState.roomId}`}
               </span>
             </div>
           </div>
@@ -164,34 +167,48 @@ export const PodiumView: React.FC = () => {
           </div>
         </div>
 
-        {/* Persistent Party Rematch Buttons (Fixes Loophole #4C where Play Again destroyed the room!) */}
+        {/* Persistent Party Rematch Buttons (All players stay in the room automatically!) */}
         {isHost ? (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <button
-              onClick={startRound}
-              className="py-4 px-5 rounded-2xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 font-black text-sm text-white shadow-xl flex items-center justify-center gap-2"
-            >
-              <RotateCcw className="w-4 h-4" />
-              <span>Keep Playing (Round #{roomState.roundNumber + 1})</span>
-            </button>
-            <button
-              onClick={returnToLobbyKeepScores}
-              className="py-4 px-5 rounded-2xl bg-white/10 hover:bg-white/15 font-bold text-sm text-white flex items-center justify-center gap-2"
-            >
-              <Sliders className="w-4 h-4 text-amber-400" />
-              <span>Lobby (Keep Scores)</span>
-            </button>
-            <button
-              onClick={resetScoresAndReturnToLobby}
-              className="py-4 px-5 rounded-2xl border border-emerald-500/40 hover:bg-emerald-500/15 font-bold text-sm text-emerald-300 flex items-center justify-center gap-2"
-            >
-              <Trophy className="w-4 h-4" />
-              <span>New Match (Reset Scores)</span>
-            </button>
+          <div className="space-y-3">
+            <div className="text-xs font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 rounded-xl py-2 px-3 text-center">
+              ✓ All {roomState.players.length} players are automatically retained — zero re-joining required!
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={restartNewMatch}
+                className="py-4 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 font-black text-sm text-white shadow-xl flex items-center justify-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>Restart Fresh Game Now (Same {roomState.players.length} Players)</span>
+              </button>
+              <button
+                onClick={startRound}
+                className="py-4 px-5 rounded-2xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 font-black text-sm text-white shadow-xl flex items-center justify-center gap-2"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>Continue Match (Round #{roomState.roundNumber + 1})</span>
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                onClick={returnToLobbyKeepScores}
+                className="py-3.5 px-5 rounded-2xl bg-white/10 hover:bg-white/15 font-bold text-xs text-white flex items-center justify-center gap-2"
+              >
+                <Sliders className="w-4 h-4 text-amber-400" />
+                <span>Lobby (Keep Scores & Players)</span>
+              </button>
+              <button
+                onClick={resetScoresAndReturnToLobby}
+                className="py-3.5 px-5 rounded-2xl border border-emerald-500/40 hover:bg-emerald-500/15 font-bold text-xs text-emerald-300 flex items-center justify-center gap-2"
+              >
+                <Trophy className="w-4 h-4" />
+                <span>Lobby (Reset Scores, Keep Players)</span>
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="text-center text-sm text-slate-400 animate-pulse">
-            Stay in this screen! When the Host starts a new match or returns to Lobby, you will automatically stay in Room #{roomState.roomId}!
+          <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 text-center text-sm text-emerald-200 font-semibold animate-pulse">
+            ✓ Stay on this screen! When the Host restarts the game or returns to Lobby, you will automatically stay in Room #{roomState.roomId} without needing to rejoin!
           </div>
         )}
       </main>

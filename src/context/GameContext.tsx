@@ -95,6 +95,7 @@ interface GameContextValue {
   showWinnersPodium: () => void;
   returnToLobbyKeepScores: () => void;
   resetScoresAndReturnToLobby: () => void;
+  restartNewMatch: () => void;
 }
 
 const GameContext = createContext<GameContextValue | null>(null);
@@ -509,10 +510,75 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         case 'START_ROUND': {
           if (!actor?.isHost) return;
+          // Automatically ensure any connected player on the mesh is in the room roster before dealing cards
+          knownPresenceMapRef.current.forEach((pres) => {
+            if (departedOrKickedIdsRef.current.has(pres.playerId) || pres.status === 'LEFT') return;
+            if (!room.players.some((p) => p.id === pres.playerId) && room.players.length < 24) {
+              room.players.push({
+                id: pres.playerId,
+                secretToken: pres.secretToken || generateId('tok'),
+                name: (pres.playerName || 'Agent').trim().slice(0, 24),
+                avatarId: typeof pres.avatarId === 'number' ? pres.avatarId : 0,
+                score: 0,
+                isHost: false,
+                isConnected: true,
+                isSpectator: false,
+                timesQuestioned: 0,
+                hasUsedAccusation: false,
+                hasVoted: false,
+                isSpy: false,
+                role: '',
+                location: null,
+                timesWasSpy: 0,
+              });
+            }
+          });
           if (room.players.length < 3) {
             setErrorBanner('Need at least 3 players in the Circle to start a round!');
             return;
           }
+          startNewRoundInRoom(room);
+          syncHostStateToAll();
+          break;
+        }
+
+        case 'RESTART_NEW_MATCH': {
+          if (!actor?.isHost) return;
+          // Automatically retain all existing players AND pull in any waiting online presence players without asking anyone to re-join
+          knownPresenceMapRef.current.forEach((pres) => {
+            if (departedOrKickedIdsRef.current.has(pres.playerId) || pres.status === 'LEFT') return;
+            if (!room.players.some((p) => p.id === pres.playerId) && room.players.length < 24) {
+              room.players.push({
+                id: pres.playerId,
+                secretToken: pres.secretToken || generateId('tok'),
+                name: (pres.playerName || 'Agent').trim().slice(0, 24),
+                avatarId: typeof pres.avatarId === 'number' ? pres.avatarId : 0,
+                score: 0,
+                isHost: false,
+                isConnected: true,
+                isSpectator: false,
+                timesQuestioned: 0,
+                hasUsedAccusation: false,
+                hasVoted: false,
+                isSpy: false,
+                role: '',
+                location: null,
+                timesWasSpy: 0,
+              });
+            }
+          });
+          if (room.players.length < 3) {
+            setErrorBanner('Need at least 3 players in the Circle to start a match!');
+            return;
+          }
+          room.players.forEach((p) => {
+            p.score = 0;
+            p.timesWasSpy = 0;
+            p.isSpectator = false;
+            p.isConnected = true;
+          });
+          room.roundNumber = 0;
+          room.previousLocations = [];
           startNewRoundInRoom(room);
           syncHostStateToAll();
           break;
@@ -595,12 +661,39 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         case 'RETURN_TO_LOBBY': {
           if (!actor?.isHost) return;
-          if (action.resetScores) {
-            room.players.forEach((p) => {
+          // Automatically ensure any waiting online presence players are added into the Lobby roster
+          knownPresenceMapRef.current.forEach((pres) => {
+            if (departedOrKickedIdsRef.current.has(pres.playerId) || pres.status === 'LEFT') return;
+            if (!room.players.some((p) => p.id === pres.playerId) && room.players.length < 24) {
+              room.players.push({
+                id: pres.playerId,
+                secretToken: pres.secretToken || generateId('tok'),
+                name: (pres.playerName || 'Agent').trim().slice(0, 24),
+                avatarId: typeof pres.avatarId === 'number' ? pres.avatarId : 0,
+                score: 0,
+                isHost: false,
+                isConnected: true,
+                isSpectator: false,
+                timesQuestioned: 0,
+                hasUsedAccusation: false,
+                hasVoted: false,
+                isSpy: false,
+                role: '',
+                location: null,
+                timesWasSpy: 0,
+              });
+            }
+          });
+          room.players.forEach((p) => {
+            p.isSpectator = false;
+            if (action.resetScores) {
               p.score = 0;
               p.timesWasSpy = 0;
-            });
+            }
+          });
+          if (action.resetScores) {
             room.roundNumber = 0;
+            room.previousLocations = [];
           }
           room.status = 'LOBBY';
           room.roundEndsAt = null;
@@ -1518,6 +1611,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           dispatchAction({ type: 'RETURN_TO_LOBBY', resetScores: false }),
         resetScoresAndReturnToLobby: () =>
           dispatchAction({ type: 'RETURN_TO_LOBBY', resetScores: true }),
+        restartNewMatch: () => dispatchAction({ type: 'RESTART_NEW_MATCH' }),
       }}
     >
       {children}

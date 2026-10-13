@@ -75,6 +75,7 @@ export const GamePlayView: React.FC = () => {
     blowCoverAsSpy,
     submitSpyGuess,
     startRound,
+    restartNewMatch,
     showWinnersPodium,
     returnToLobbyKeepScores,
     removePlayer,
@@ -108,7 +109,7 @@ export const GamePlayView: React.FC = () => {
   const votingEndsAt = roomState?.votingEndsAt;
   const spyGuessEndsAt = roomState?.spyGuessEndsAt;
 
-  // Reset local markings cleanly whenever a new round starts!
+  // Reset local markings cleanly whenever a new round or fresh match starts!
   useEffect(() => {
     setSuspectTags({});
     setCrossedLocations({});
@@ -120,7 +121,7 @@ export const GamePlayView: React.FC = () => {
     setPnpAllRevealed(roomState?.mode !== 'PASS_AND_PLAY');
     setPnpActiveVoterIdx(0);
     setPnpMidRoundSpyModal(false);
-  }, [roundNumber, roomState?.mode]);
+  }, [roundNumber, roomState?.roundStartedAt, roomState?.mode]);
 
   // Play the Shaq Siren sound automatically across ALL connected devices whenever VOTING begins!
   useEffect(() => {
@@ -1036,31 +1037,45 @@ export const GamePlayView: React.FC = () => {
             </div>
 
             {isHost ? (
-              <div className="flex flex-col sm:flex-row gap-2.5">
-                <button
-                  onClick={startRound}
-                  className="flex-1 py-4 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 font-black text-white shadow-xl flex items-center justify-center gap-2 transition-all"
-                >
-                  <RotateCcw className="w-5 h-5" />
-                  <span>Play Next Round (#{roundNumber + 1})</span>
-                </button>
-                <button
-                  onClick={returnToLobbyKeepScores}
-                  className="py-3.5 px-4 rounded-2xl bg-white/10 hover:bg-white/15 font-bold text-xs text-white"
-                >
-                  Lobby
-                </button>
-                <button
-                  onClick={showWinnersPodium}
-                  className="py-3.5 px-4 rounded-2xl bg-gradient-to-r from-amber-500 to-rose-600 font-bold text-xs text-white flex items-center justify-center gap-1.5"
-                >
-                  <Trophy className="w-4 h-4" />
-                  <span>Podium</span>
-                </button>
+              <div className="space-y-2.5">
+                <div className="text-[11px] font-mono text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 rounded-xl py-1.5 px-3 text-center">
+                  ✓ All {players.length} players stay in this Circle automatically — no re-joining needed!
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    onClick={startRound}
+                    className="py-4 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 font-black text-sm text-white shadow-xl flex items-center justify-center gap-2 transition-all"
+                  >
+                    <RotateCcw className="w-5 h-5" />
+                    <span>Next Round (#{roundNumber + 1})</span>
+                  </button>
+                  <button
+                    onClick={restartNewMatch}
+                    className="py-4 px-5 rounded-2xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 font-black text-sm text-white shadow-xl flex items-center justify-center gap-2 transition-all"
+                  >
+                    <RotateCcw className="w-5 h-5" />
+                    <span>Restart Fresh Game (Same Players)</span>
+                  </button>
+                </div>
+                <div className="flex gap-2.5">
+                  <button
+                    onClick={returnToLobbyKeepScores}
+                    className="flex-1 py-3 px-4 rounded-2xl bg-white/10 hover:bg-white/15 font-bold text-xs text-white"
+                  >
+                    Change Deck / Settings (Lobby)
+                  </button>
+                  <button
+                    onClick={showWinnersPodium}
+                    className="flex-1 py-3 px-4 rounded-2xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 font-bold text-xs text-amber-200 flex items-center justify-center gap-1.5"
+                  >
+                    <Trophy className="w-4 h-4" />
+                    <span>Final Podium</span>
+                  </button>
+                </div>
               </div>
             ) : (
-              <div className="text-center text-sm text-slate-300">
-                Waiting for Host to start Round #{roundNumber + 1}...
+              <div className="p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 text-center text-xs sm:text-sm text-emerald-200 font-semibold">
+                ✓ Stay on this screen! You are automatically added to the next game when the Host restarts.
               </div>
             )}
           </div>
