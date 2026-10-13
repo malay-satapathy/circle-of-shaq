@@ -11,6 +11,7 @@ import {
   passQuestionMic,
   initiateVotingPhase,
   cancelVotingPhase,
+  handlePlayerDeparture,
   castPlayerVote,
   finalizeVotingOutcome,
   triggerMidRoundSpyReveal,
@@ -58,6 +59,7 @@ interface PresencePayload {
   playerName: string;
   avatarId: number;
   joinedAt: number;
+  status?: 'ONLINE' | 'LEFT';
 }
 
 interface GameContextValue {
@@ -124,7 +126,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const lastRoomHashRef = useRef<string>('');
   const lastRoleHashRef = useRef<string>('');
   const knownPresenceMapRef = useRef<Map<string, PresencePayload>>(new Map());
-  const kickedPlayerIdsRef = useRef<Set<string>>(new Set());
+  const departedOrKickedIdsRef = useRef<Set<string>>(new Set());
 
   const peerRef = useRef<Peer | null>(null);
   const guestConnsRef = useRef<Map<string, DataConnection>>(new Map());
@@ -151,17 +153,22 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   /**
-   * Merges any newly discovered presence payloads into a PublicRoomState for optimistic Guest rendering
+   * Merges active presence payloads and filters out any departed/kicked players for instant Guest UI updates
    */
   const mergePresenceIntoPublicState = useCallback((baseState: PublicRoomState): PublicRoomState => {
-    const mergedPlayers = [...baseState.players];
-    let added = false;
+    // 1. Filter out anyone who has explicitly departed or been kicked
+    const filteredPlayers = baseState.players.filter(
+      (p) => !departedOrKickedIdsRef.current.has(p.id)
+    );
+    let changed = filteredPlayers.length !== baseState.players.length;
+
+    // 2. Add any newly discovered active presence payloads
     knownPresenceMapRef.current.forEach((pres) => {
-      if (kickedPlayerIdsRef.current.has(pres.playerId)) return;
-      if (!mergedPlayers.some((p) => p.id === pres.playerId)) {
-        added = true;
+      if (departedOrKickedIdsRef.current.has(pres.playerId) || pres.status === 'LEFT') return;
+      if (!filteredPlayers.some((p) => p.id === pres.playerId)) {
+        changed = true;
         const isMidGame = baseState.status !== 'LOBBY' && baseState.status !== 'PODIUM';
-        mergedPlayers.push({
+        filteredPlayers.push({
           id: pres.playerId,
           name: pres.playerName,
           avatarId: pres.avatarId,
@@ -175,10 +182,11 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
       }
     });
-    if (!added) return baseState;
+
+    if (!changed) return baseState;
     return {
       ...baseState,
-      players: mergedPlayers,
+      players: filteredPlayers,
     };
   }, []);
 
@@ -246,7 +254,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         seq,
         roomId: room.roomId,
         roomState: pubState,
-        kickedIds: Array.from(kickedPlayerIdsRef.current),
+        departedIds: Array.from(departedOrKickedIdsRef.current),
       },
       true
     );
@@ -319,8 +327,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           if (!playerId) return;
 
           if (action.isExplicitJoin) {
-            kickedPlayerIdsRef.current.delete(playerId);
-          } else if (kickedPlayerIdsRef.current.has(playerId)) {
+            departedOrKickedIdsRef.current.delete(playerId);
+          } else if (departedOrKickedIdsRef.current.has(playerId)) {
             return;
           }
 
@@ -380,14 +388,49 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
               location: null,
               timesWasSpy: 0,
             });
-            if (isMidGame) {
-              room.logs.unshift({
-                id: `log-${Date.now()}-spec`,
-                timestamp: Date.now(),
-                text: `👀 ${playerName} joined as Spectator and will be dealt into the next round!`,
-                type: 'info',
-              });
-            }
+            syncHostStateToAll();
+          }
+          break;
+        }
+
+        case 'PLAYER_LEFT': {
+          const targetId = action.playerId || actorId;
+          if (!targetId) return;
+          departedOrKickedIdsRef.current.add(targetId);
+          knownPresenceMapRef.current.delete(targetId);
+          publishToCloudMesh(
+            `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${targetId}`,
+            '',
+            true
+          );
+          const conn = guestConnsRef.current.get(targetId);
+          if (conn) {
+            conn.close();
+            guestConnsRef.current.delete(targetId);
+          }
+          if (handlePlayerDeparture(room, targetId)) {
+            syncHostStateToAll();
+          }
+          break;
+        }
+
+        case 'REMOVE_PLAYER': {
+          if (!actor?.isHost) return;
+          if (action.targetPlayerId === actor.id) return;
+          const targetId = action.targetPlayerId;
+          departedOrKickedIdsRef.current.add(targetId);
+          knownPresenceMapRef.current.delete(targetId);
+          publishToCloudMesh(
+            `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${targetId}`,
+            '',
+            true
+          );
+          const targetConn = guestConnsRef.current.get(targetId);
+          if (targetConn) {
+            targetConn.close();
+            guestConnsRef.current.delete(targetId);
+          }
+          if (handlePlayerDeparture(room, targetId)) {
             syncHostStateToAll();
           }
           break;
@@ -416,26 +459,6 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
               emoji: c.emoji,
               category: c.category,
             }));
-          }
-          syncHostStateToAll();
-          break;
-        }
-
-        case 'REMOVE_PLAYER': {
-          if (!actor?.isHost) return;
-          if (action.targetPlayerId === actor.id) return;
-          kickedPlayerIdsRef.current.add(action.targetPlayerId);
-          knownPresenceMapRef.current.delete(action.targetPlayerId);
-          room.players = room.players.filter((p) => p.id !== action.targetPlayerId);
-          publishToCloudMesh(
-            `${MQTT_TOPIC_PREFIX}/${room.roomId}/presence/${action.targetPlayerId}`,
-            '',
-            true
-          );
-          const targetConn = guestConnsRef.current.get(action.targetPlayerId);
-          if (targetConn) {
-            targetConn.close();
-            guestConnsRef.current.delete(action.targetPlayerId);
           }
           syncHostStateToAll();
           break;
@@ -602,6 +625,8 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   /**
    * Connects to the Multi-Broker Cloud WSS Mesh for a given Room Code.
+   * Configures MQTT Last Will & Testament (`will`) so if a player's tab is closed or crashes,
+   * the broker automatically clears their presence and notifies the Circle to remove them!
    */
   const setupCloudMesh = useCallback(
     (
@@ -619,17 +644,25 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const stateTopic = `${MQTT_TOPIC_PREFIX}/${roomId}/state`;
         const presenceWildcard = `${MQTT_TOPIC_PREFIX}/${roomId}/presence/+`;
         const actionsTopic = `${MQTT_TOPIC_PREFIX}/${roomId}/actions`;
-        const myRoleTopic = myPlayerIdRef.current
-          ? `${MQTT_TOPIC_PREFIX}/${roomId}/role/${myPlayerIdRef.current}`
-          : null;
+        const myId = myPlayerIdRef.current;
+        const myRoleTopic = myId ? `${MQTT_TOPIC_PREFIX}/${roomId}/role/${myId}` : null;
 
         CLOUD_WSS_BROKERS.forEach((brokerUrl) => {
           try {
             const client = mqtt.connect(brokerUrl, {
-              keepalive: 30,
-              reconnectPeriod: 3000,
+              keepalive: 20,
+              reconnectPeriod: 2500,
               connectTimeout: 6000,
               clean: true,
+              will:
+                !isHostMode && myId
+                  ? {
+                      topic: `${MQTT_TOPIC_PREFIX}/${roomId}/presence/${myId}`,
+                      payload: '',
+                      qos: 1,
+                      retain: true,
+                    }
+                  : undefined,
             });
             clients.push(client);
 
@@ -656,20 +689,53 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             client.on('message', (topic, payloadBuf) => {
               const rawStr = payloadBuf.toString();
-              if (!rawStr) return;
 
-              let data: any;
-              try {
-                data = JSON.parse(rawStr);
-              } catch {
-                return;
-              }
-              if (!data || typeof data !== 'object') return;
-
-              // 1. Handle Retained Player Presence (`.../presence/{playerId}`)
+              // 1. Handle Player Presence & Automatic Departure (`.../presence/{playerId}`)
               if (topic.includes('/presence/')) {
-                const pres = data as PresencePayload;
-                if (!pres.playerId) return;
+                const topicParts = topic.split('/presence/');
+                const topicPlayerId = topicParts[1];
+                if (!topicPlayerId) return;
+
+                // Empty payload (from leaveRoom or MQTT Last Will on tab close) means the player left!
+                if (!rawStr || rawStr.trim() === '') {
+                  knownPresenceMapRef.current.delete(topicPlayerId);
+                  departedOrKickedIdsRef.current.add(topicPlayerId);
+
+                  if (isHostMode && hostRoomRef.current) {
+                    if (handlePlayerDeparture(hostRoomRef.current, topicPlayerId)) {
+                      syncHostStateToAll();
+                    }
+                  } else if (!isHostMode) {
+                    setRoomState((prev) => {
+                      if (!prev) return prev;
+                      const next = mergePresenceIntoPublicState(prev);
+                      const hash = JSON.stringify(next);
+                      if (hash === lastRoomHashRef.current) return prev;
+                      lastRoomHashRef.current = hash;
+                      return next;
+                    });
+                  }
+                  return;
+                }
+
+                let pres: PresencePayload;
+                try {
+                  pres = JSON.parse(rawStr);
+                } catch {
+                  return;
+                }
+                if (!pres || !pres.playerId) return;
+
+                if (pres.status === 'LEFT') {
+                  knownPresenceMapRef.current.delete(pres.playerId);
+                  departedOrKickedIdsRef.current.add(pres.playerId);
+                  if (isHostMode && hostRoomRef.current) {
+                    if (handlePlayerDeparture(hostRoomRef.current, pres.playerId)) {
+                      syncHostStateToAll();
+                    }
+                  }
+                  return;
+                }
 
                 const prevPres = knownPresenceMapRef.current.get(pres.playerId);
                 knownPresenceMapRef.current.set(pres.playerId, pres);
@@ -678,7 +744,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   const alreadyInRoom = hostRoomRef.current.players.some(
                     (p) => p.id === pres.playerId
                   );
-                  if (!alreadyInRoom && !kickedPlayerIdsRef.current.has(pres.playerId)) {
+                  if (!alreadyInRoom && !departedOrKickedIdsRef.current.has(pres.playerId)) {
                     processHostAction(
                       {
                         type: 'JOIN_REQUEST',
@@ -703,10 +769,22 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 return;
               }
 
+              if (!rawStr) return;
+              let data: any;
+              try {
+                data = JSON.parse(rawStr);
+              } catch {
+                return;
+              }
+              if (!data || typeof data !== 'object') return;
+
               // 2. Handle Retained Room State (`.../state`) on Guest devices
               if (!isHostMode && topic === stateTopic && data.type === 'CLOUD_STATE_SYNC' && data.roomState) {
-                if (Array.isArray(data.kickedIds)) {
-                  data.kickedIds.forEach((id: string) => kickedPlayerIdsRef.current.add(id));
+                if (Array.isArray(data.departedIds)) {
+                  data.departedIds.forEach((id: string) => {
+                    departedOrKickedIdsRef.current.add(id);
+                    knownPresenceMapRef.current.delete(id);
+                  });
                 }
 
                 const merged = mergePresenceIntoPublicState(data.roomState);
@@ -785,7 +863,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   /**
-   * Optional Secondary Transport: PeerJS WebRTC
+   * Secondary Transport: PeerJS WebRTC
    */
   const startHostPeerNode = useCallback(
     (roomId: string): Promise<boolean> => {
@@ -919,7 +997,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       secretTokenRef.current = secretToken;
       setMyPlayerId(hostId);
       knownPresenceMapRef.current.clear();
-      kickedPlayerIdsRef.current.clear();
+      departedOrKickedIdsRef.current.clear();
       processedActionIdsRef.current.clear();
       lastRoomHashRef.current = '';
       lastRoleHashRef.current = '';
@@ -968,7 +1046,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setErrorBanner(null);
       setConnectionStatus('CONNECTING');
       knownPresenceMapRef.current.clear();
-      kickedPlayerIdsRef.current.clear();
+      departedOrKickedIdsRef.current.clear();
       latestStateSeqRef.current = 0;
       lastRoomHashRef.current = '';
       lastRoleHashRef.current = '';
@@ -1025,6 +1103,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         playerName: cleanName,
         avatarId,
         joinedAt: Date.now(),
+        status: 'ONLINE',
       };
       knownPresenceMapRef.current.set(playerId, presencePayload);
 
@@ -1220,11 +1299,50 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const myId = myPlayerIdRef.current;
 
     if (activeRoomId && myId && !hostRoomRef.current) {
+      const leaveAction = {
+        actionId: generateId('act'),
+        type: 'PLAYER_LEFT',
+        playerId: myId,
+      };
+
+      // 1. Clear retained presence on Cloud WSS Mesh (triggers immediate removal on all peers + Host!)
       publishToCloudMesh(
         `${MQTT_TOPIC_PREFIX}/${activeRoomId}/presence/${myId}`,
         '',
         true
       );
+
+      // 2. Broadcast explicit PLAYER_LEFT action across Cloud Mesh, WebRTC, and BroadcastChannel
+      publishToCloudMesh(
+        `${MQTT_TOPIC_PREFIX}/${activeRoomId}/actions`,
+        {
+          type: 'CLOUD_CLIENT_ACTION',
+          senderId: myId,
+          action: leaveAction,
+        },
+        false
+      );
+
+      if (hostConnRef.current && hostConnRef.current.open) {
+        try {
+          hostConnRef.current.send({
+            type: 'CLIENT_ACTION',
+            senderId: myId,
+            action: leaveAction,
+          });
+        } catch {
+          // ignore
+        }
+      }
+
+      if (bcRef.current) {
+        bcRef.current.postMessage({
+          type: 'BC_CLIENT_ACTION',
+          roomId: activeRoomId,
+          senderId: myId,
+          action: leaveAction,
+        });
+      }
     }
 
     sessionStorage.removeItem(STORAGE_KEY_SESSION);
@@ -1232,11 +1350,14 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     hostRoomRef.current = null;
     activeRoomIdRef.current = null;
     knownPresenceMapRef.current.clear();
-    kickedPlayerIdsRef.current.clear();
+    departedOrKickedIdsRef.current.clear();
     lastRoomHashRef.current = '';
     lastRoleHashRef.current = '';
 
-    cleanupCloudMesh();
+    // Allow 120ms for the departure packets to flush over the WebSockets before closing the socket handles
+    setTimeout(() => {
+      cleanupCloudMesh();
+    }, 120);
 
     if (hostConnRef.current) {
       hostConnRef.current.close();

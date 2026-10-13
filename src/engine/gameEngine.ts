@@ -427,6 +427,72 @@ export function cancelVotingPhase(room: InternalRoom): { ok: boolean } {
   return { ok: true };
 }
 
+/**
+ * Enterprise Automatic Player Departure Handler:
+ * Removes a player who leaves or disconnects from the Circle & Suspects Board,
+ * cleans up any pending votes, promotes a new Host if needed, and resolves the round if the Spy left!
+ */
+export function handlePlayerDeparture(room: InternalRoom, departingPlayerId: string): boolean {
+  const idx = room.players.findIndex((p) => p.id === departingPlayerId);
+  if (idx === -1) return false;
+
+  const departing = room.players[idx];
+  room.players.splice(idx, 1);
+
+  // Clean up any votes cast by or against the departed player
+  delete room.votes[departingPlayerId];
+  for (const [voterId, targetId] of Object.entries(room.votes)) {
+    if (targetId === departingPlayerId) {
+      delete room.votes[voterId];
+      const voter = room.players.find((p) => p.id === voterId);
+      if (voter) voter.hasVoted = false;
+    }
+  }
+
+  // Ensure there is always an active Host if players remain
+  if (departing.isHost && room.players.length > 0) {
+    room.players[0].isHost = true;
+  }
+
+  // If we are in an active round, check if the game state needs immediate resolution
+  if (room.status === 'PLAYING' || room.status === 'VOTING' || room.status === 'SPY_GUESS') {
+    const activeRemaining = room.players.filter((p) => !p.isSpectator);
+    const remainingSpies = activeRemaining.filter((p) => p.isSpy);
+
+    // If all Spies left the game mid-round, Innocents automatically win the round!
+    if (remainingSpies.length === 0 && activeRemaining.length >= 2) {
+      concludeRoundWithScoring(room, 'SPY_CAUGHT', departing.id, null);
+      if (room.lastRoundSummary) {
+        room.lastRoundSummary.headline = `Circle Wins! Gaddar ${departing.name} Fled the Circle!`;
+        room.lastRoundSummary.subtext = `${departing.name} left the game mid-round. The secret location was "${room.secretLocation}".`;
+        room.lastRoundSummary.spies = [
+          { id: departing.id, name: departing.name, avatarId: departing.avatarId },
+        ];
+      }
+      return true;
+    }
+
+    // If fewer than 2 players remain, return cleanly to Lobby
+    if (activeRemaining.length < 2) {
+      room.status = 'LOBBY';
+      room.roundEndsAt = null;
+      room.votingEndsAt = null;
+      room.spyGuessEndsAt = null;
+      return true;
+    }
+
+    // If in VOTING and all remaining eligible players have now voted, finalize immediately
+    if (room.status === 'VOTING') {
+      const allVoted = activeRemaining.every((p) => Boolean(room.votes[p.id]));
+      if (allVoted) {
+        finalizeVotingOutcome(room);
+      }
+    }
+  }
+
+  return true;
+}
+
 export function castPlayerVote(
   room: InternalRoom,
   voterId: string,

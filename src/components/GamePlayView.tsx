@@ -12,6 +12,7 @@ import {
   Users,
   Layers,
   Volume2,
+  Trash2,
 } from 'lucide-react';
 import { useGame } from '../context/GameContext';
 import { AVATARS, getDeckById } from '../data/decks';
@@ -75,6 +76,7 @@ export const GamePlayView: React.FC = () => {
     startRound,
     showWinnersPodium,
     returnToLobbyKeepScores,
+    removePlayer,
     getPassAndPlayRole,
     errorBanner,
     clearError,
@@ -567,11 +569,9 @@ export const GamePlayView: React.FC = () => {
                 const tag = suspectTags[p.id] || 'UNKNOWN';
 
                 return (
-                  <button
+                  <div
                     key={p.id}
-                    type="button"
-                    onClick={() => cycleSuspectTag(p.id)}
-                    className={`w-full p-3 rounded-2xl border transition-all flex items-center justify-between gap-2 text-left ${
+                    className={`w-full p-3 rounded-2xl border transition-all flex items-center justify-between gap-2 ${
                       tag === 'SHAQ'
                         ? 'bg-rose-950/40 border-rose-500/60'
                         : tag === 'PAKKA'
@@ -579,7 +579,11 @@ export const GamePlayView: React.FC = () => {
                         : 'bg-white/[0.03] border-white/10 hover:border-white/20'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => cycleSuspectTag(p.id)}
+                      className="flex items-center gap-2.5 min-w-0 flex-1 text-left"
+                    >
                       <div
                         className={`w-9 h-9 rounded-xl bg-gradient-to-br ${av.bg} flex items-center justify-center text-base shrink-0`}
                       >
@@ -596,20 +600,35 @@ export const GamePlayView: React.FC = () => {
                           {p.score} pts
                         </div>
                       </div>
-                    </div>
+                    </button>
 
-                    <span
-                      className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase shrink-0 ${
-                        tag === 'SHAQ'
-                          ? 'bg-rose-500 text-white'
-                          : tag === 'PAKKA'
-                          ? 'bg-emerald-500 text-black'
-                          : 'bg-white/10 text-slate-400'
-                      }`}
-                    >
-                      {tag === 'SHAQ' ? '🚨 SHAQ' : tag === 'PAKKA' ? '✓ SAFE' : 'Tap to Tag'}
-                    </span>
-                  </button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => cycleSuspectTag(p.id)}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase ${
+                          tag === 'SHAQ'
+                            ? 'bg-rose-500 text-white'
+                            : tag === 'PAKKA'
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-white/10 text-slate-400'
+                        }`}
+                      >
+                        {tag === 'SHAQ' ? '🚨 SHAQ' : tag === 'PAKKA' ? '✓ SAFE' : 'Tap to Tag'}
+                      </button>
+
+                      {isHost && !p.isHost && p.id !== myPlayerId && (
+                        <button
+                          type="button"
+                          onClick={() => removePlayer(p.id)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                          title={`Remove ${p.name} from Circle`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 );
               })}
             </div>
