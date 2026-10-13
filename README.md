@@ -1,6 +1,9 @@
 # 🔥 CIRCLE OF SHAQ
 > **"Rise and shine, it's dhokha time…"**  
 > The Next-Generation Multiplayer Social Deduction Party Game for **3 to 24+ Players**.
+>
+> 🌐 **Live Web App:** **[https://malay-satapathy.github.io/circle-of-shaq/](https://malay-satapathy.github.io/circle-of-shaq/)**  
+> 📦 **GitHub Repository:** **[https://github.com/malay-satapathy/circle-of-shaq](https://github.com/malay-satapathy/circle-of-shaq)**
 
 ---
 
